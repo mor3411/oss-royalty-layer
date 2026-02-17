@@ -1,5 +1,6 @@
 const tsParser = require("@typescript-eslint/parser");
 const tsPlugin = require("@typescript-eslint/eslint-plugin");
+const prettierConfig = require("eslint-config-prettier");
 
 module.exports = [
   {
@@ -18,7 +19,7 @@ module.exports = [
       ecmaVersion: 2022,
       sourceType: "module",
       parserOptions: {
-        project: "./tsconfig.json",
+        project: ["./tsconfig.json", "./tsconfig.test.json"],
         tsconfigRootDir: __dirname
       }
     },
@@ -34,7 +35,8 @@ module.exports = [
           prefer: "type-imports"
         }
       ],
-      "@typescript-eslint/no-floating-promises": "error"
+      "@typescript-eslint/no-floating-promises": "error",
+      ...prettierConfig.rules
     }
   }
 ];

@@ -104,9 +104,19 @@ export const DomainSchemaRegistry = z.object({
   payout: PayoutSchema,
 });
 
+export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
+export type Period = z.infer<typeof PeriodSchema>;
+export type CurrencyCode = z.infer<typeof CurrencyCodeSchema>;
+export type Ecosystem = z.infer<typeof EcosystemSchema>;
+export type UsageSource = z.infer<typeof UsageSourceSchema>;
+export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
+export type PayoutStatus = z.infer<typeof PayoutStatusSchema>;
+export type PayoutAccount = z.infer<typeof PayoutAccountSchema>;
+export type RoyaltyPolicy = z.infer<typeof RoyaltyPolicySchema>;
 export type Library = z.infer<typeof LibrarySchema>;
 export type Maintainer = z.infer<typeof MaintainerSchema>;
 export type UsageRecord = z.infer<typeof UsageRecordSchema>;
 export type RoyaltyPool = z.infer<typeof RoyaltyPoolSchema>;
 export type Allocation = z.infer<typeof AllocationSchema>;
 export type Payout = z.infer<typeof PayoutSchema>;
+export type DomainSchemaRegistryRecord = z.infer<typeof DomainSchemaRegistry>;

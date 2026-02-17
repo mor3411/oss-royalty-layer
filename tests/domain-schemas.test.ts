@@ -178,4 +178,41 @@ describe("domain schemas", () => {
       })
     ).toThrowError();
   });
+
+  it("rejects payouts with non-positive amount_minor", () => {
+    expect(() =>
+      PayoutSchema.parse({
+        id: "pay-3",
+        period: "2026-02",
+        maintainer_id: "mnt-1",
+        amount_minor: 0,
+        currency: "USD",
+        status: "queued",
+      })
+    ).toThrowError();
+  });
+
+  it("rejects libraries with empty ids", () => {
+    expect(() =>
+      LibrarySchema.parse({
+        id: "",
+        name: "zod",
+        ecosystem: "npm",
+      })
+    ).toThrowError();
+  });
+
+  it("rejects usage records with non-ISO timestamps", () => {
+    expect(() =>
+      UsageRecordSchema.parse({
+        id: "use-2",
+        agent_session_id: "sess-2",
+        library_id: "lib-2",
+        version: "1.0.0",
+        call_count: 1,
+        source: "cli",
+        ts: "02/17/2026 12:00:00",
+      })
+    ).toThrowError();
+  });
 });
