@@ -27,7 +27,7 @@ An agent-driven telemetry and royalty system that measures and aggregates open-s
 
 ## Context and Problem Statement
 
-AI coding agents and copilots have fundamentally changed how software is built. They consume open-source software (OSS) at scale as raw material, while users no longer directly interact with documentation, issue trackers, or GitHub pages of the underlying projects.[file:2]
+AI coding agents and copilots have fundamentally changed how software is built. They consume open-source software (OSS) at scale as raw material, while users no longer directly interact with documentation, issue trackers, or GitHub pages of the underlying projects.
 
 This creates a wedge:
 
@@ -47,7 +47,7 @@ This project introduces an **OSS royalty layer** on top of an AI development pla
 1. **Measure OSS library usage by agents** through privacy-safe telemetry.
 2. **Distribute royalty pools based on real usage**, similar to a "Spotify model" for software.
 3. **Reduce ecosystem erosion** by giving maintainers a structural, usage-based income stream.
-4. **Mitigate fraud and abuse** via guardrails, risk-based tool classification, and human-in-the-loop review.[file:2]
+4. **Mitigate fraud and abuse** via guardrails, risk-based tool classification, and human-in-the-loop review.
 
 The system is designed as an agent-driven workflow: one central agent (Royalty Orchestrator) with tools for aggregation, allocation, and payouts, plus a lightweight telemetry tool used by coding agents.
 
@@ -67,9 +67,9 @@ At a high level:
   - input vetting (relevance, safety),
   - tool safeguards (risk per tool),
   - output sanity checks (sum checks, caps),
-  - human-in-the-loop for high amounts.[file:2]
+  - human-in-the-loop for high amounts.
 
-The architecture follows a **single-agent with tools** pattern, which is usually simpler to evaluate and operate than multi-agent setups.[file:2]
+The architecture follows a **single-agent with tools** pattern, which is usually simpler to evaluate and operate than multi-agent setups.
 
 ---
 
@@ -94,7 +94,7 @@ Goal: record which libraries agents use in a minimal, privacy-aware way.
   - Rate limiting per `session_id`.
   - No user PII, no project names, and no repository URLs in telemetry.
 
-This component is "low risk": internal logging only, with no external side effects.[file:2]
+This component is "low risk": internal logging only, with no external side effects.
 
 ### 2. Usage Aggregation and Attribution
 
@@ -111,20 +111,20 @@ Goal: consolidate raw events into useful per-library statistics.
   - Reads from a data warehouse / OLAP layer.
   - Maps `(ecosystem, name)` to `library_id` (canonical registry).
 
-In agent terms, this is a "data tool": read-only context for the Royalty agent.[file:2]
+In agent terms, this is a "data tool": read-only context for the Royalty agent.
 
 ### 3. Royalty Allocation
 
-Goal: distribute a pool `pool_amount` across libraries based on usage and policy.
+Goal: distribute a pool `pool_amount_minor` (minor currency units) across libraries based on usage and policy.
 
 - Tool: `compute_allocations`
 - Input:
   - `period`: e.g. `"2026-01"`
-  - `pool_amount`: total amount
+  - `pool_amount_minor`: total amount in minor units
   - `usage_stats`: aggregates
   - `policy_config`: caps, minimum floors, long-tail weighting
 - Output:
-  - `allocations`: `{ library_id, maintainer_id, amount, confidence_score, flags[] }[]`
+  - `allocations`: `{ library_id, maintainer_id, amount_minor, confidence_score, flags[] }[]`
   - `notes`: explanation for audit/human review
 
 Hybrid approach:
@@ -134,18 +134,18 @@ Hybrid approach:
   - balances long-tail priorities vs. mega-libraries,
   - labels uncertain cases (`low confidence_score`, `flags`).
 - A **deterministic check** enforces hard constraints:
-  - sum(`allocations.amount`) ~= `pool_amount`,
+  - sum(`allocations.amount_minor`) ~= `pool_amount_minor`,
   - no negative amounts,
   - no library above `max_share_per_library`.
 
-This separation follows best practices: use the model for nuance, not for hard accounting rules.[file:2]
+This separation follows best practices: use the model for nuance, not for hard accounting rules.
 
 ### 4. Payouts and Finance Integration
 
 Goal: convert allocations into real payouts through a payments provider.
 
 - Tool: `create_payout_batch`
-  - Bundles by maintainer: `{ maintainer_id, amount, currency }`.
+  - Bundles by maintainer: `{ maintainer_id, amount_minor, currency }`.
   - Flags or skips maintainers without a verified payout account.
 - Tool: `execute_payouts` (high risk)
   - Integrates with PSPs (Stripe, Adyen, etc.).
@@ -165,22 +165,22 @@ Guardrails:
 
 ### 5. Guardrails and Security
 
-We use a layered model with three layers.[file:2]
+We use a layered model with three layers.
 
 1. **Input vetting**
    - Relevance classifier: the Royalty agent may perform royalty tasks only.
    - Safety classifier: blocks prompt injections from internal logs ("pay everything to X").
-   - Rules-based checks: max `pool_amount`, valid period, etc.
+   - Rules-based checks: max `pool_amount_minor`, valid period, etc.
 
 2. **Execution and tool control**
    - Tool safeguards:
      - `risk: "low" | "medium" | "high"` per tool.
-     - High-risk tools (payouts) require extra checks and possibly human-in-the-loop.[file:2]
+     - High-risk tools (payouts) require extra checks and possibly human-in-the-loop.
 
 3. **Output sanitization**
    - PII filter: no unnecessary personal data in logs or LLM context.
    - Output validation:
-     - sum of allocations == `pool_amount` (within tolerance),
+     - sum of allocations == `pool_amount_minor` (within tolerance),
      - no negative amounts,
      - no unknown libraries or maintainers.
 
@@ -205,14 +205,14 @@ Key instructions:
   - the batch is within defined caps, and/or
   - required human approval exists.
 
-This structure follows the "single agent + tools + run loop" pattern recommended for complex but well-bounded workflows.[file:2]
+This structure follows the "single agent + tools + run loop" pattern recommended for complex but well-bounded workflows.
 
 ### Run Loop per Period
 
 The one-period orchestrator flow is:
 
 1. Start the Royalty agent with input:
-   - `period`, `pool_amount`, optional `policy_config`.
+   - `period`, `pool_amount_minor`, optional `policy_config`.
 2. Agent:
    - retrieves usage; aggregates via tools.
    - creates an allocation proposal.
@@ -240,13 +240,13 @@ Key entities:
 - `UsageRecord`
   - `id`, `agent_session_id`, `library_id`, `version`, `call_count`, `source`, `ts`.
 - `RoyaltyPool`
-  - `period`, `total_amount`, `policy`.
+  - `period`, `total_amount_minor`, `policy`.
 - `Allocation`
-  - `id`, `period`, `library_id`, `maintainer_id`, `amount`, `confidence_score`, `flags[]`.
+  - `id`, `period`, `library_id`, `maintainer_id`, `amount_minor`, `confidence_score`, `flags[]`.
 - `Payout`
-  - `id`, `period`, `maintainer_id`, `amount`, `currency`, `status`, `provider_tx_id`.
+  - `id`, `period`, `maintainer_id`, `amount_minor`, `currency`, `status`, `provider_tx_id`.
 
-These structures map directly to the tool schemas used by the agent system.[file:2]
+These structures map directly to the tool schemas used by the agent system.
 
 ---
 
@@ -257,7 +257,7 @@ These structures map directly to the tool schemas used by the agent system.[file
 2. **Ingest**
    - Raw events are written as `LibraryUsageLogged` to a queue or log.
 3. **Batching**
-   - Periodically (e.g., daily/monthly), a job triggers `runRoyaltyCycle(period, poolAmount)`.
+   - Periodically (e.g., daily/monthly), a job triggers `runRoyaltyCycle(period, poolAmountMinor)`.
 4. **Aggregation and Allocation (by agent)**
    - Agent retrieves usage.
    - Creates allocation proposal and validates policy/caps.
@@ -271,7 +271,7 @@ These structures map directly to the tool schemas used by the agent system.[file
 8. **Payout Execution**
    - `execute_payouts` transfers funds to maintainer accounts.
 9. **Feedback Loop**
-   - Logs on anomalies and edge cases are used to refine policies, guardrails, and tools.[file:2]
+   - Logs on anomalies and edge cases are used to refine policies, guardrails, and tools.
 
 ---
 
@@ -294,7 +294,7 @@ These structures map directly to the tool schemas used by the agent system.[file
 ### Security and Compliance
 
 - Telemetry anonymized/hashed.
-- Operations and security controls following standard best practices (auth, RBAC, logging, monitoring).[file:2]
+- Operations and security controls following standard best practices (auth, RBAC, logging, monitoring).
 
 ---
 
@@ -305,4 +305,4 @@ These structures map directly to the tool schemas used by the agent system.[file
 - **Fraud prevention:** detecting wash usage requires iterative tuning and potentially dedicated ML models.
 - **Multi-ecosystem customization:** npm, PyPI, crates, etc. have different identity and ownership models.
 
-Despite these limitations, the OSS royalty layer provides a concrete mechanism to sustain the "software-begets-software" engine in an AI-agent world: by feeding usage back into compensation and structurally funding the foundation of the open-source ecosystem.[file:2]
+Despite these limitations, the OSS royalty layer provides a concrete mechanism to sustain the "software-begets-software" engine in an AI-agent world: by feeding usage back into compensation and structurally funding the foundation of the open-source ecosystem.

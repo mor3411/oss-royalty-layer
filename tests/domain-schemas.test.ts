@@ -44,10 +44,10 @@ describe("domain schemas", () => {
 
     const royaltyPool = RoyaltyPoolSchema.parse({
       period: "2026-02",
-      total_amount: 1000,
+      total_amount_minor: 100000,
       policy: {
         max_share_per_library: 0.25,
-        min_floor_amount: 5,
+        min_floor_amount_minor: 500,
         long_tail_weight: 1.1,
       },
     });
@@ -57,7 +57,7 @@ describe("domain schemas", () => {
       period: "2026-02",
       library_id: library.id,
       maintainer_id: maintainer.id,
-      amount: 120.5,
+      amount_minor: 12050,
       confidence_score: 0.8,
       flags: [],
     });
@@ -66,14 +66,14 @@ describe("domain schemas", () => {
       id: "pay-1",
       period: "2026-02",
       maintainer_id: maintainer.id,
-      amount: 120.5,
+      amount_minor: 12050,
       currency: "usd",
       status: "queued",
     });
 
     expect(usageRecord.call_count).toBe(12);
     expect(royaltyPool.period).toBe("2026-02");
-    expect(allocation.amount).toBe(120.5);
+    expect(allocation.amount_minor).toBe(12050);
     expect(payout.currency).toBe("USD");
   });
 
@@ -103,10 +103,10 @@ describe("domain schemas", () => {
       },
       royalty_pool: {
         period: "2026-02",
-        total_amount: 20,
+        total_amount_minor: 2000,
         policy: {
           max_share_per_library: 0.2,
-          min_floor_amount: 0,
+          min_floor_amount_minor: 0,
           long_tail_weight: 1,
         },
       },
@@ -115,14 +115,14 @@ describe("domain schemas", () => {
         period: "2026-02",
         library_id: "lib-1",
         maintainer_id: "mnt-1",
-        amount: 10,
+        amount_minor: 1000,
         confidence_score: 0.7,
       },
       payout: {
         id: "pay-1",
         period: "2026-02",
         maintainer_id: "mnt-1",
-        amount: 10,
+        amount_minor: 1000,
         currency: "USD",
         status: "processing",
       },
@@ -135,10 +135,10 @@ describe("domain schemas", () => {
     expect(() =>
       RoyaltyPoolSchema.parse({
         period: "2026-13",
-        total_amount: 10,
+        total_amount_minor: 1000,
         policy: {
           max_share_per_library: 0.2,
-          min_floor_amount: 1,
+          min_floor_amount_minor: 100,
           long_tail_weight: 1,
         },
       })
@@ -150,8 +150,31 @@ describe("domain schemas", () => {
         period: "2026-02",
         library_id: "lib-1",
         maintainer_id: "mnt-1",
-        amount: 10,
+        amount_minor: 1000,
         confidence_score: 1.2,
+      })
+    ).toThrowError();
+
+    expect(() =>
+      PayoutSchema.parse({
+        id: "pay-2",
+        period: "2026-02",
+        maintainer_id: "mnt-1",
+        amount_minor: 1000,
+        currency: "US1",
+        status: "queued",
+      })
+    ).toThrowError();
+
+    expect(() =>
+      RoyaltyPoolSchema.parse({
+        period: "2026-02",
+        total_amount_minor: 10.5,
+        policy: {
+          max_share_per_library: 0.2,
+          min_floor_amount_minor: 0,
+          long_tail_weight: 1,
+        },
       })
     ).toThrowError();
   });

@@ -1,14 +1,10 @@
 import { z } from "zod";
+import { CurrencyCodeSchema } from "../shared/currency.js";
 
 export const DOMAIN_SCHEMA_VERSION = "1.0.0" as const;
 
 export const SchemaVersionSchema = z.literal(DOMAIN_SCHEMA_VERSION);
 export const PeriodSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
-export const CurrencyCodeSchema = z
-  .string()
-  .length(3)
-  .transform((value) => value.toUpperCase());
-
 export const EcosystemSchema = z.enum([
   "npm",
   "pypi",
@@ -42,7 +38,7 @@ export const PayoutAccountSchema = z.object({
 
 export const RoyaltyPolicySchema = z.object({
   max_share_per_library: z.number().min(0).max(1).default(0.2),
-  min_floor_amount: z.number().min(0).default(0),
+  min_floor_amount_minor: z.number().int().nonnegative().default(0),
   long_tail_weight: z.number().positive().default(1),
 });
 
@@ -74,7 +70,7 @@ export const UsageRecordSchema = z.object({
 
 export const RoyaltyPoolSchema = z.object({
   period: PeriodSchema,
-  total_amount: z.number().positive(),
+  total_amount_minor: z.number().int().positive(),
   policy: RoyaltyPolicySchema,
 });
 
@@ -83,7 +79,7 @@ export const AllocationSchema = z.object({
   period: PeriodSchema,
   library_id: z.string().min(1),
   maintainer_id: z.string().min(1),
-  amount: z.number().nonnegative(),
+  amount_minor: z.number().int().nonnegative(),
   confidence_score: z.number().min(0).max(1),
   flags: z.array(z.string().min(1)).default([]),
 });
@@ -92,7 +88,7 @@ export const PayoutSchema = z.object({
   id: z.string().min(1),
   period: PeriodSchema,
   maintainer_id: z.string().min(1),
-  amount: z.number().positive(),
+  amount_minor: z.number().int().positive(),
   currency: CurrencyCodeSchema,
   status: PayoutStatusSchema,
   provider_tx_id: z.string().min(1).optional(),
