@@ -53,6 +53,7 @@ const LogLibraryUsageRejectionReasonSchema = z.enum([
   "duplicate_event",
   "enqueue_failed",
   "guardrails_not_configured",
+  "guardrail_failure",
 ]);
 
 export const LogLibraryUsageOutputSchema = z.discriminatedUnion("status", [
@@ -308,6 +309,20 @@ const inMemorySessionRateLimiter: SessionRateLimiter = {
   },
 };
 
+async function releaseReservedFingerprints(
+  replayProtection: ReplayProtection,
+  fingerprints: string[]
+): Promise<boolean> {
+  try {
+    for (const fingerprint of fingerprints) {
+      await replayProtection.release(fingerprint);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function logLibraryUsage(
   input: unknown,
   options: LogLibraryUsageOptions = {}
@@ -335,8 +350,15 @@ export async function logLibraryUsage(
     };
   }
 
-  await replayProtection.cleanup(nowMs, replayWindowMs);
-  await rateLimiter.cleanup(nowMs, rateLimitWindowMs);
+  try {
+    await replayProtection.cleanup(nowMs, replayWindowMs);
+    await rateLimiter.cleanup(nowMs, rateLimitWindowMs);
+  } catch {
+    return {
+      status: "rejected",
+      reason: "guardrail_failure",
+    };
+  }
 
   const parsedInput = LogLibraryUsageInputSchema.safeParse(input);
 
@@ -359,16 +381,27 @@ export async function logLibraryUsage(
   const candidateEvents: Array<{ event: LibraryUsageLoggedEvent; fingerprint: string }> = [];
   const seenFingerprints = new Set<string>();
 
-  for (const event of normalizedEvents) {
-    const fingerprint = fingerprintEvent(event);
-    if (seenFingerprints.has(fingerprint)) {
-      continue;
+  try {
+    for (const event of normalizedEvents) {
+      const fingerprint = fingerprintEvent(event);
+      if (seenFingerprints.has(fingerprint)) {
+        continue;
+      }
+      seenFingerprints.add(fingerprint);
+      if (!(await replayProtection.reserve(fingerprint, nowMs))) {
+        continue;
+      }
+      candidateEvents.push({ event, fingerprint });
     }
-    seenFingerprints.add(fingerprint);
-    if (!(await replayProtection.reserve(fingerprint, nowMs))) {
-      continue;
-    }
-    candidateEvents.push({ event, fingerprint });
+  } catch {
+    await releaseReservedFingerprints(
+      replayProtection,
+      candidateEvents.map((candidate) => candidate.fingerprint)
+    );
+    return {
+      status: "rejected",
+      reason: "guardrail_failure",
+    };
   }
 
   if (candidateEvents.length === 0) {
@@ -378,18 +411,37 @@ export async function logLibraryUsage(
     };
   }
 
-  const allowedByRateLimit = await rateLimiter.consume(
-    parsedInput.data.session_id,
-    candidateEvents.length,
-    nowMs,
-    rateLimitWindowMs,
-    maxRequestsPerWindow,
-    maxLibrariesPerWindow
-  );
+  let allowedByRateLimit: boolean;
+  try {
+    allowedByRateLimit = await rateLimiter.consume(
+      parsedInput.data.session_id,
+      candidateEvents.length,
+      nowMs,
+      rateLimitWindowMs,
+      maxRequestsPerWindow,
+      maxLibrariesPerWindow
+    );
+  } catch {
+    await releaseReservedFingerprints(
+      replayProtection,
+      candidateEvents.map((candidate) => candidate.fingerprint)
+    );
+    return {
+      status: "rejected",
+      reason: "guardrail_failure",
+    };
+  }
 
   if (!allowedByRateLimit) {
-    for (const candidate of candidateEvents) {
-      await replayProtection.release(candidate.fingerprint);
+    const released = await releaseReservedFingerprints(
+      replayProtection,
+      candidateEvents.map((candidate) => candidate.fingerprint)
+    );
+    if (!released) {
+      return {
+        status: "rejected",
+        reason: "guardrail_failure",
+      };
     }
     return {
       status: "rejected",
@@ -408,21 +460,40 @@ export async function logLibraryUsage(
       await enqueueEvent(candidate.event);
       recordedCount += 1;
     } catch {
+      const pendingFingerprints: string[] = [];
       for (let releaseIndex = index; releaseIndex < candidateEvents.length; releaseIndex += 1) {
         const pending = candidateEvents[releaseIndex];
         if (!pending) {
           continue;
         }
-        await replayProtection.release(pending.fingerprint);
+        pendingFingerprints.push(pending.fingerprint);
       }
 
-      await rateLimiter.refund(
-        parsedInput.data.session_id,
-        recordedCount === 0 ? 1 : 0,
-        candidateEvents.length - recordedCount,
-        nowMs,
-        rateLimitWindowMs
-      );
+      const released = await releaseReservedFingerprints(replayProtection, pendingFingerprints);
+
+      try {
+        await rateLimiter.refund(
+          parsedInput.data.session_id,
+          recordedCount === 0 ? 1 : 0,
+          candidateEvents.length - recordedCount,
+          nowMs,
+          rateLimitWindowMs
+        );
+      } catch {
+        return {
+          status: "rejected",
+          reason: "guardrail_failure",
+          recorded_count: recordedCount,
+        };
+      }
+
+      if (!released) {
+        return {
+          status: "rejected",
+          reason: "guardrail_failure",
+          recorded_count: recordedCount,
+        };
+      }
 
       return {
         status: "rejected",

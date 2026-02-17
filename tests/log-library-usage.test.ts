@@ -447,4 +447,83 @@ describe("logLibraryUsage", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it("returns rejected output when replay guardrail cleanup throws", async () => {
+    const replayProtection = {
+      cleanup: vi.fn().mockRejectedValue(new Error("replay backend unavailable")),
+      reserve: vi.fn(),
+      release: vi.fn(),
+    };
+
+    const result = await logLibraryUsage(
+      {
+        session_id: SESSION_IDS.one,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [
+          {
+            name: "zod",
+            ecosystem: "npm",
+            version: "3.23.8",
+            calls: 1,
+          },
+        ],
+      },
+      { replayProtection }
+    );
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "guardrail_failure",
+    });
+  });
+
+  it("returns rejected output and releases reservations when rate limiter throws", async () => {
+    const reservedFingerprints = new Set<string>();
+    const replayProtection = {
+      cleanup: vi.fn(),
+      reserve: vi.fn((fingerprint: string) => {
+        if (reservedFingerprints.has(fingerprint)) {
+          return false;
+        }
+        reservedFingerprints.add(fingerprint);
+        return true;
+      }),
+      release: vi.fn((fingerprint: string) => {
+        reservedFingerprints.delete(fingerprint);
+      }),
+    };
+    const rateLimiter = {
+      cleanup: vi.fn(),
+      consume: vi.fn().mockRejectedValue(new Error("rate backend unavailable")),
+      refund: vi.fn(),
+    };
+
+    const result = await logLibraryUsage(
+      {
+        session_id: SESSION_IDS.two,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [
+          {
+            name: "zod",
+            ecosystem: "npm",
+            version: "3.23.8",
+            calls: 1,
+          },
+        ],
+      },
+      {
+        replayProtection,
+        rateLimiter,
+      }
+    );
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "guardrail_failure",
+    });
+    expect(replayProtection.release).toHaveBeenCalledTimes(1);
+    expect(reservedFingerprints.size).toBe(0);
+  });
 });
