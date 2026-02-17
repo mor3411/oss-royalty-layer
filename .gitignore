@@ -1,4 +1,12 @@
 ACTION-PLAN.md
-README.md
 STEPS.md
 .idea
+.claude
+/backup/
+node_modules/
+dist/
+coverage/
+.env
+/.codex/
+/PROJECT-BOARD.md
+/AGENTS.md
