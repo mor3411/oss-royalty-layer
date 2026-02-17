@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  clearLibraryUsageEvents,
-  getLibraryUsageEvents,
   logLibraryUsage,
   MAX_LIBRARIES_PER_CALL,
 } from "../src/tools/log-library-usage.js";
+import { clearLibraryUsageEvents, getLibraryUsageEvents } from "../src/tools/testing.js";
 
 const SESSION_IDS = {
   one: "a".repeat(64),
@@ -182,6 +181,17 @@ describe("logLibraryUsage", () => {
       recorded_count: 1,
     });
     expect(enqueueEvent).toHaveBeenCalledTimes(1);
+    expect(enqueueEvent).toHaveBeenCalledWith({
+      session_id: SESSION_IDS.four,
+      source: "ci",
+      ts: "2026-02-17T12:00:00.000Z",
+      library: {
+        name: "fastapi",
+        ecosystem: "pypi",
+        version: "0.115.3",
+        calls: 2,
+      },
+    });
     expect(getLibraryUsageEvents()).toHaveLength(0);
   });
 

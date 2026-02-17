@@ -7,7 +7,7 @@ describe("currency schema", () => {
     expect(CurrencyCodeSchema.parse(" usd ")).toBe("USD");
   });
 
-  it("rejects non-letter currency codes", () => {
+  it("rejects invalid currency codes (non-letter or wrong length)", () => {
     expect(() => CurrencyCodeSchema.parse("US1")).toThrowError();
     expect(() => CurrencyCodeSchema.parse("US")).toThrowError();
     expect(() => CurrencyCodeSchema.parse("USDD")).toThrowError();

@@ -45,21 +45,27 @@ export const LogLibraryUsageInputSchema = z.object({
   libraries: z.array(LibraryUsagePayloadSchema).min(1).max(MAX_LIBRARIES_PER_CALL),
 });
 
-export const LogLibraryUsageOutputSchema = z.object({
-  status: z.enum(["ok", "rejected"]),
-  recorded_count: z.number().int().nonnegative().optional(),
-  reason: z
-    .enum([
-      "invalid_payload",
-      "too_many_libraries",
-      "no_libraries",
-      "rate_limited",
-      "duplicate_event",
-      "enqueue_failed",
-      "guardrails_not_configured",
-    ])
-    .optional(),
-});
+const LogLibraryUsageRejectionReasonSchema = z.enum([
+  "invalid_payload",
+  "too_many_libraries",
+  "no_libraries",
+  "rate_limited",
+  "duplicate_event",
+  "enqueue_failed",
+  "guardrails_not_configured",
+]);
+
+export const LogLibraryUsageOutputSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    recorded_count: z.number().int().nonnegative(),
+  }),
+  z.object({
+    status: z.literal("rejected"),
+    reason: LogLibraryUsageRejectionReasonSchema,
+    recorded_count: z.number().int().nonnegative().optional(),
+  }),
+]);
 
 export const LibraryUsageLoggedEventSchema = z.object({
   session_id: z.string(),
@@ -143,24 +149,19 @@ function defaultEnqueueLibraryUsageEvent(event: LibraryUsageLoggedEvent): void {
 }
 
 function getRejectionReason(error: z.ZodError): "invalid_payload" | "too_many_libraries" | "no_libraries" {
-  const firstIssue = error.issues[0];
-  if (!firstIssue) {
-    return "invalid_payload";
-  }
-
-  if (
-    firstIssue.path.length === 1 &&
-    firstIssue.path[0] === "libraries" &&
-    firstIssue.code === "too_big"
-  ) {
+  const hasTooManyLibrariesIssue = error.issues.some(
+    (issue) =>
+      issue.path.length === 1 && issue.path[0] === "libraries" && issue.code === "too_big"
+  );
+  if (hasTooManyLibrariesIssue) {
     return "too_many_libraries";
   }
 
-  if (
-    firstIssue.path.length === 1 &&
-    firstIssue.path[0] === "libraries" &&
-    firstIssue.code === "too_small"
-  ) {
+  const hasNoLibrariesIssue = error.issues.some(
+    (issue) =>
+      issue.path.length === 1 && issue.path[0] === "libraries" && issue.code === "too_small"
+  );
+  if (hasNoLibrariesIssue) {
     return "no_libraries";
   }
 
