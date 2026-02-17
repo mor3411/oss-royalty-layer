@@ -218,7 +218,7 @@ describe("logLibraryUsage", () => {
   });
 
   it("rejects requests when session rate limit is exceeded", async () => {
-    const input = {
+    const firstInput = {
       session_id: SESSION_IDS.six,
       source: "api",
       ts: "2026-02-17T12:00:00.000Z",
@@ -232,12 +232,24 @@ describe("logLibraryUsage", () => {
       ],
     };
 
-    const first = await logLibraryUsage(input, {
+    const secondInput = {
+      ...firstInput,
+      libraries: [
+        {
+          name: "redis",
+          ecosystem: "npm",
+          version: "4.0.0",
+          calls: 1,
+        },
+      ],
+    };
+
+    const first = await logLibraryUsage(firstInput, {
       now: () => 0,
       rateLimitWindowMs: 60_000,
       maxRequestsPerWindow: 1,
     });
-    const second = await logLibraryUsage(input, {
+    const second = await logLibraryUsage(secondInput, {
       now: () => 1_000,
       rateLimitWindowMs: 60_000,
       maxRequestsPerWindow: 1,
@@ -247,6 +259,81 @@ describe("logLibraryUsage", () => {
     expect(second).toEqual({
       status: "rejected",
       reason: "rate_limited",
+    });
+  });
+
+  it("does not mark replay cache when enqueue fails before any success", async () => {
+    const enqueueEvent = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("queue unavailable"))
+      .mockResolvedValueOnce(undefined);
+
+    const input = {
+      session_id: SESSION_IDS.one,
+      source: "api",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries: [
+        {
+          name: "zod",
+          ecosystem: "npm",
+          version: "3.23.8",
+          calls: 1,
+        },
+      ],
+    };
+
+    const first = await logLibraryUsage(input, { enqueueEvent });
+    const second = await logLibraryUsage(input, { enqueueEvent });
+
+    expect(first).toEqual({
+      status: "rejected",
+      reason: "enqueue_failed",
+      recorded_count: 0,
+    });
+    expect(second).toEqual({
+      status: "ok",
+      recorded_count: 1,
+    });
+  });
+
+  it("allows retry to continue after partial enqueue success", async () => {
+    const enqueueEvent = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("queue timeout"))
+      .mockResolvedValueOnce(undefined);
+
+    const input = {
+      session_id: SESSION_IDS.two,
+      source: "api",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries: [
+        {
+          name: "zod",
+          ecosystem: "npm",
+          version: "3.23.8",
+          calls: 1,
+        },
+        {
+          name: "redis",
+          ecosystem: "npm",
+          version: "4.0.0",
+          calls: 1,
+        },
+      ],
+    };
+
+    const first = await logLibraryUsage(input, { enqueueEvent });
+    const second = await logLibraryUsage(input, { enqueueEvent });
+
+    expect(first).toEqual({
+      status: "rejected",
+      reason: "enqueue_failed",
+      recorded_count: 1,
+    });
+    expect(second).toEqual({
+      status: "ok",
+      recorded_count: 1,
     });
   });
 });

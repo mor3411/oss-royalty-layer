@@ -55,6 +55,7 @@ export const LogLibraryUsageOutputSchema = z.object({
       "no_libraries",
       "rate_limited",
       "duplicate_event",
+      "enqueue_failed",
     ])
     .optional(),
 });
@@ -82,6 +83,8 @@ export type LogLibraryUsageOptions = {
   maxRequestsPerWindow?: number;
   maxLibrariesPerWindow?: number;
   now?: () => number;
+  replayProtection?: ReplayProtection;
+  rateLimiter?: SessionRateLimiter;
 };
 
 const inMemoryLibraryUsageEvents: LibraryUsageLoggedEvent[] = [];
@@ -94,6 +97,24 @@ const sessionRateLimitState = new Map<
     libraries: number;
   }
 >();
+
+type ReplayProtection = {
+  cleanup: (nowMs: number, replayWindowMs: number) => Promise<void> | void;
+  has: (fingerprint: string) => Promise<boolean> | boolean;
+  mark: (fingerprint: string, nowMs: number) => Promise<void> | void;
+};
+
+type SessionRateLimiter = {
+  cleanup: (nowMs: number, windowMs: number) => Promise<void> | void;
+  consume: (
+    sessionId: string,
+    librariesCount: number,
+    nowMs: number,
+    windowMs: number,
+    maxRequestsPerWindow: number,
+    maxLibrariesPerWindow: number
+  ) => Promise<boolean> | boolean;
+};
 
 export function clearLibraryUsageEvents(): void {
   inMemoryLibraryUsageEvents.length = 0;
@@ -204,6 +225,41 @@ function fingerprintEvent(event: LibraryUsageLoggedEvent): string {
   return createHash("sha256").update(JSON.stringify(event)).digest("hex");
 }
 
+const inMemoryReplayProtection: ReplayProtection = {
+  cleanup(nowMs: number, replayWindowMs: number): void {
+    cleanupReplayCache(nowMs, replayWindowMs);
+  },
+  has(fingerprint: string): boolean {
+    return replayCache.has(fingerprint);
+  },
+  mark(fingerprint: string, nowMs: number): void {
+    replayCache.set(fingerprint, nowMs);
+  },
+};
+
+const inMemorySessionRateLimiter: SessionRateLimiter = {
+  cleanup(nowMs: number, windowMs: number): void {
+    cleanupRateLimitState(nowMs, windowMs);
+  },
+  consume(
+    sessionId: string,
+    librariesCount: number,
+    nowMs: number,
+    windowMs: number,
+    maxRequestsPerWindow: number,
+    maxLibrariesPerWindow: number
+  ): boolean {
+    return checkAndConsumeRateLimit(
+      sessionId,
+      librariesCount,
+      nowMs,
+      windowMs,
+      maxRequestsPerWindow,
+      maxLibrariesPerWindow
+    );
+  },
+};
+
 export async function logLibraryUsage(
   input: unknown,
   options: LogLibraryUsageOptions = {}
@@ -215,9 +271,11 @@ export async function logLibraryUsage(
     options.maxRequestsPerWindow ?? DEFAULT_MAX_REQUESTS_PER_WINDOW;
   const maxLibrariesPerWindow =
     options.maxLibrariesPerWindow ?? DEFAULT_MAX_LIBRARIES_PER_WINDOW;
+  const replayProtection = options.replayProtection ?? inMemoryReplayProtection;
+  const rateLimiter = options.rateLimiter ?? inMemorySessionRateLimiter;
 
-  cleanupReplayCache(nowMs, replayWindowMs);
-  cleanupRateLimitState(nowMs, rateLimitWindowMs);
+  await replayProtection.cleanup(nowMs, replayWindowMs);
+  await rateLimiter.cleanup(nowMs, rateLimitWindowMs);
 
   const parsedInput = LogLibraryUsageInputSchema.safeParse(input);
 
@@ -230,9 +288,38 @@ export async function logLibraryUsage(
 
   const enqueueEvent = options.enqueueEvent ?? defaultEnqueueLibraryUsageEvent;
 
-  const allowedByRateLimit = checkAndConsumeRateLimit(
+  const normalizedEvents = parsedInput.data.libraries.map((library) => ({
+    session_id: parsedInput.data.session_id,
+    source: parsedInput.data.source,
+    ts: parsedInput.data.ts,
+    library,
+  }));
+
+  const candidateEvents: Array<{ event: LibraryUsageLoggedEvent; fingerprint: string }> = [];
+  const seenFingerprints = new Set<string>();
+
+  for (const event of normalizedEvents) {
+    const fingerprint = fingerprintEvent(event);
+    if (seenFingerprints.has(fingerprint)) {
+      continue;
+    }
+    seenFingerprints.add(fingerprint);
+    if (await replayProtection.has(fingerprint)) {
+      continue;
+    }
+    candidateEvents.push({ event, fingerprint });
+  }
+
+  if (candidateEvents.length === 0) {
+    return {
+      status: "rejected",
+      reason: "duplicate_event",
+    };
+  }
+
+  const allowedByRateLimit = await rateLimiter.consume(
     parsedInput.data.session_id,
-    parsedInput.data.libraries.length,
+    candidateEvents.length,
     nowMs,
     rateLimitWindowMs,
     maxRequestsPerWindow,
@@ -246,39 +333,23 @@ export async function logLibraryUsage(
     };
   }
 
-  const normalizedEvents = parsedInput.data.libraries.map((library) => ({
-    session_id: parsedInput.data.session_id,
-    source: parsedInput.data.source,
-    ts: parsedInput.data.ts,
-    library,
-  }));
-
-  for (const event of normalizedEvents) {
-    const fingerprint = fingerprintEvent(event);
-    if (replayCache.has(fingerprint)) {
+  let recordedCount = 0;
+  for (const candidate of candidateEvents) {
+    try {
+      await enqueueEvent(candidate.event);
+      await replayProtection.mark(candidate.fingerprint, nowMs);
+      recordedCount += 1;
+    } catch {
       return {
         status: "rejected",
-        reason: "duplicate_event",
+        reason: "enqueue_failed",
+        recorded_count: recordedCount,
       };
     }
   }
 
-  for (const event of normalizedEvents) {
-    const fingerprint = fingerprintEvent(event);
-    replayCache.set(fingerprint, nowMs);
-  }
-
-  for (const library of parsedInput.data.libraries) {
-    await enqueueEvent({
-      session_id: parsedInput.data.session_id,
-      source: parsedInput.data.source,
-      ts: parsedInput.data.ts,
-      library,
-    });
-  }
-
   return {
     status: "ok",
-    recorded_count: parsedInput.data.libraries.length,
+    recorded_count: recordedCount,
   };
 }
