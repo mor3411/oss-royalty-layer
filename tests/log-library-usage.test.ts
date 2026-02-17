@@ -217,6 +217,47 @@ describe("logLibraryUsage", () => {
     });
   });
 
+  it("accepts only one of two concurrent duplicate requests", async () => {
+    const input = {
+      session_id: SESSION_IDS.five,
+      source: "cli",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries: [
+        {
+          name: "redis",
+          ecosystem: "npm",
+          version: "1.0.0",
+          calls: 1,
+        },
+      ],
+    };
+
+    const enqueueEvent = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const [first, second] = await Promise.all([
+      logLibraryUsage(input, {
+        enqueueEvent,
+        now: () => 0,
+        replayWindowMs: 60_000,
+      }),
+      logLibraryUsage(input, {
+        enqueueEvent,
+        now: () => 0,
+        replayWindowMs: 60_000,
+      }),
+    ]);
+
+    const okResults = [first, second].filter((result) => result.status === "ok");
+    const duplicateResults = [first, second].filter(
+      (result) => result.status === "rejected" && result.reason === "duplicate_event"
+    );
+
+    expect(okResults).toHaveLength(1);
+    expect(duplicateResults).toHaveLength(1);
+  });
+
   it("rejects requests when session rate limit is exceeded", async () => {
     const firstInput = {
       session_id: SESSION_IDS.six,
@@ -282,8 +323,20 @@ describe("logLibraryUsage", () => {
       ],
     };
 
-    const first = await logLibraryUsage(input, { enqueueEvent });
-    const second = await logLibraryUsage(input, { enqueueEvent });
+    const first = await logLibraryUsage(input, {
+      enqueueEvent,
+      now: () => 0,
+      rateLimitWindowMs: 60_000,
+      maxRequestsPerWindow: 1,
+      maxLibrariesPerWindow: 1,
+    });
+    const second = await logLibraryUsage(input, {
+      enqueueEvent,
+      now: () => 1,
+      rateLimitWindowMs: 60_000,
+      maxRequestsPerWindow: 1,
+      maxLibrariesPerWindow: 1,
+    });
 
     expect(first).toEqual({
       status: "rejected",
@@ -323,8 +376,20 @@ describe("logLibraryUsage", () => {
       ],
     };
 
-    const first = await logLibraryUsage(input, { enqueueEvent });
-    const second = await logLibraryUsage(input, { enqueueEvent });
+    const first = await logLibraryUsage(input, {
+      enqueueEvent,
+      now: () => 0,
+      rateLimitWindowMs: 60_000,
+      maxRequestsPerWindow: 10,
+      maxLibrariesPerWindow: 2,
+    });
+    const second = await logLibraryUsage(input, {
+      enqueueEvent,
+      now: () => 1,
+      rateLimitWindowMs: 60_000,
+      maxRequestsPerWindow: 10,
+      maxLibrariesPerWindow: 2,
+    });
 
     expect(first).toEqual({
       status: "rejected",
@@ -335,5 +400,41 @@ describe("logLibraryUsage", () => {
       status: "ok",
       recorded_count: 1,
     });
+  });
+
+  it("rejects in production when in-memory guardrails are used without explicit opt-in", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    try {
+      const input = {
+        session_id: SESSION_IDS.six,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [
+          {
+            name: "zod",
+            ecosystem: "npm",
+            version: "3.23.8",
+            calls: 1,
+          },
+        ],
+      };
+
+      const rejected = await logLibraryUsage(input);
+      const allowed = await logLibraryUsage(input, {
+        allowInMemoryGuardsInProduction: true,
+      });
+
+      expect(rejected).toEqual({
+        status: "rejected",
+        reason: "guardrails_not_configured",
+      });
+      expect(allowed).toEqual({
+        status: "ok",
+        recorded_count: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
