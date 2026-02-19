@@ -5,6 +5,7 @@ import { EcosystemSchema, UsageSourceSchema } from "../domain/index.js";
 
 export const MAX_LIBRARIES_PER_CALL = 1000;
 export const MAX_IN_MEMORY_EVENTS = 10_000;
+export const MAX_IN_MEMORY_REJECTION_AUDITS = 10_000;
 export const MAX_REPLAY_CACHE_ENTRIES = 50_000;
 export const MAX_RATE_LIMIT_ENTRIES = 20_000;
 export const DEFAULT_REPLAY_WINDOW_MS = 5 * 60 * 1000;
@@ -53,6 +54,18 @@ const LogLibraryUsageRejectionReasonSchema = z.enum([
   "guardrail_failure",
 ]);
 
+export const LibraryUsageRejectionAuditSchema = z.object({
+  observed_at: z.string().datetime(),
+  runtime_environment: RuntimeEnvironmentSchema,
+  reason: LogLibraryUsageRejectionReasonSchema,
+  session_id: z.string().optional(),
+  source: z.string().optional(),
+  ts: z.string().optional(),
+  libraries_count: z.number().int().nonnegative().optional(),
+  candidate_events_count: z.number().int().nonnegative().optional(),
+  recorded_count: z.number().int().nonnegative().optional(),
+});
+
 export const LogLibraryUsageOutputSchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ok"),
@@ -76,8 +89,13 @@ export type LibraryUsagePayload = z.infer<typeof LibraryUsagePayloadSchema>;
 export type LogLibraryUsageInput = z.infer<typeof LogLibraryUsageInputSchema>;
 export type LogLibraryUsageOutput = z.infer<typeof LogLibraryUsageOutputSchema>;
 export type LibraryUsageLoggedEvent = z.infer<typeof LibraryUsageLoggedEventSchema>;
+export type LogLibraryUsageRejectionReason = z.infer<typeof LogLibraryUsageRejectionReasonSchema>;
+export type LibraryUsageRejectionAudit = z.infer<typeof LibraryUsageRejectionAuditSchema>;
 
 export type EnqueueLibraryUsageEvent = (event: LibraryUsageLoggedEvent) => Promise<void> | void;
+export type AuditLibraryUsageRejection = (
+  event: LibraryUsageRejectionAudit
+) => Promise<void> | void;
 
 export type LogLibraryUsageOptions = {
   enqueueEvent?: EnqueueLibraryUsageEvent;
@@ -88,11 +106,13 @@ export type LogLibraryUsageOptions = {
   now?: () => number;
   replayProtection?: ReplayProtection;
   rateLimiter?: SessionRateLimiter;
+  auditRejection?: AuditLibraryUsageRejection;
   allowInMemoryGuardsInProduction?: boolean;
   runtimeEnvironment?: "development" | "test" | "production";
 };
 
 const inMemoryLibraryUsageEvents: LibraryUsageLoggedEvent[] = [];
+const inMemoryLibraryUsageRejectionAudits: LibraryUsageRejectionAudit[] = [];
 const replayCache = new Map<string, number>();
 const sessionRateLimitState = new Map<
   string,
@@ -130,6 +150,7 @@ type SessionRateLimiter = {
 
 export function clearLibraryUsageEvents(): void {
   inMemoryLibraryUsageEvents.length = 0;
+  inMemoryLibraryUsageRejectionAudits.length = 0;
   replayCache.clear();
   sessionRateLimitState.clear();
 }
@@ -138,11 +159,22 @@ export function getLibraryUsageEvents(): LibraryUsageLoggedEvent[] {
   return [...inMemoryLibraryUsageEvents];
 }
 
+export function getLibraryUsageRejectionAudits(): LibraryUsageRejectionAudit[] {
+  return [...inMemoryLibraryUsageRejectionAudits];
+}
+
 function defaultEnqueueLibraryUsageEvent(event: LibraryUsageLoggedEvent): void {
   while (inMemoryLibraryUsageEvents.length >= MAX_IN_MEMORY_EVENTS) {
     inMemoryLibraryUsageEvents.shift();
   }
   inMemoryLibraryUsageEvents.push(event);
+}
+
+function defaultAuditLibraryUsageRejection(event: LibraryUsageRejectionAudit): void {
+  while (inMemoryLibraryUsageRejectionAudits.length >= MAX_IN_MEMORY_REJECTION_AUDITS) {
+    inMemoryLibraryUsageRejectionAudits.shift();
+  }
+  inMemoryLibraryUsageRejectionAudits.push(event);
 }
 
 function getRejectionReason(
@@ -268,6 +300,45 @@ function isPositiveInteger(value: number): boolean {
   return Number.isInteger(value) && value > 0;
 }
 
+function toAuditSessionId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!SESSION_ID_REGEX.test(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function toAuditSource(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!UsageSourceSchema.safeParse(normalized).success) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function toAuditTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  if (!z.string().datetime().safeParse(value).success) {
+    return undefined;
+  }
+  return value;
+}
+
+function toAuditLibraryCount(value: unknown): number | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.length;
+}
+
 function resolveRuntimeEnvironment(
   override: LogLibraryUsageOptions["runtimeEnvironment"]
 ): "development" | "test" | "production" {
@@ -356,8 +427,83 @@ export async function logLibraryUsage(
   const runtimeEnvironment = resolveRuntimeEnvironment(options.runtimeEnvironment);
   const replayProtection = options.replayProtection ?? inMemoryReplayProtection;
   const rateLimiter = options.rateLimiter ?? inMemorySessionRateLimiter;
+  const auditRejection = options.auditRejection ?? defaultAuditLibraryUsageRejection;
   const usesInMemoryGuardrails =
     replayProtection === inMemoryReplayProtection || rateLimiter === inMemorySessionRateLimiter;
+
+  const rawAuditContext =
+    typeof input === "object" && input !== null ? (input as Record<string, unknown>) : null;
+
+  const defaultAuditContext = {
+    sessionId: toAuditSessionId(rawAuditContext?.session_id),
+    source: toAuditSource(rawAuditContext?.source),
+    timestamp: toAuditTimestamp(rawAuditContext?.ts),
+    librariesCount: toAuditLibraryCount(rawAuditContext?.libraries),
+  };
+
+  const reject = async (
+    reason: LogLibraryUsageRejectionReason,
+    context: {
+      sessionId?: string;
+      source?: string;
+      timestamp?: string;
+      librariesCount?: number;
+      candidateEventsCount?: number;
+      recordedCount?: number;
+    } = {}
+  ): Promise<LogLibraryUsageOutput> => {
+    const rejectedOutput: LogLibraryUsageOutput = {
+      status: "rejected",
+      reason,
+      ...(context.recordedCount === undefined ? {} : { recorded_count: context.recordedCount }),
+    };
+
+    const auditEvent: LibraryUsageRejectionAudit = {
+      observed_at: new Date(nowMs).toISOString(),
+      runtime_environment: runtimeEnvironment,
+      reason,
+    };
+
+    const sessionId = context.sessionId ?? defaultAuditContext.sessionId;
+    if (sessionId) {
+      auditEvent.session_id = sessionId;
+    }
+
+    const source = context.source ?? defaultAuditContext.source;
+    if (source) {
+      auditEvent.source = source;
+    }
+
+    const timestamp = context.timestamp ?? defaultAuditContext.timestamp;
+    if (timestamp) {
+      auditEvent.ts = timestamp;
+    }
+
+    const librariesCount = context.librariesCount ?? defaultAuditContext.librariesCount;
+    if (librariesCount !== undefined) {
+      auditEvent.libraries_count = librariesCount;
+    }
+
+    if (context.candidateEventsCount !== undefined) {
+      auditEvent.candidate_events_count = context.candidateEventsCount;
+    }
+
+    if (context.recordedCount !== undefined) {
+      auditEvent.recorded_count = context.recordedCount;
+    }
+
+    try {
+      await auditRejection(auditEvent);
+    } catch {
+      return {
+        status: "rejected",
+        reason: "guardrail_failure",
+        ...(context.recordedCount === undefined ? {} : { recorded_count: context.recordedCount }),
+      };
+    }
+
+    return rejectedOutput;
+  };
 
   if (
     !isPositiveInteger(replayWindowMs) ||
@@ -365,10 +511,7 @@ export async function logLibraryUsage(
     !isPositiveInteger(maxRequestsPerWindow) ||
     !isPositiveInteger(maxLibrariesPerWindow)
   ) {
-    return {
-      status: "rejected",
-      reason: "guardrail_failure",
-    };
+    return reject("guardrail_failure");
   }
 
   if (
@@ -376,30 +519,28 @@ export async function logLibraryUsage(
     usesInMemoryGuardrails &&
     !options.allowInMemoryGuardsInProduction
   ) {
-    return {
-      status: "rejected",
-      reason: "guardrails_not_configured",
-    };
+    return reject("guardrails_not_configured");
   }
 
   try {
     await replayProtection.cleanup(nowMs, replayWindowMs);
     await rateLimiter.cleanup(nowMs, rateLimitWindowMs);
   } catch {
-    return {
-      status: "rejected",
-      reason: "guardrail_failure",
-    };
+    return reject("guardrail_failure");
   }
 
   const parsedInput = LogLibraryUsageInputSchema.safeParse(input);
 
   if (!parsedInput.success) {
-    return {
-      status: "rejected",
-      reason: getRejectionReason(parsedInput.error),
-    };
+    return reject(getRejectionReason(parsedInput.error));
   }
+
+  const parsedAuditContext = {
+    sessionId: parsedInput.data.session_id,
+    source: parsedInput.data.source,
+    timestamp: parsedInput.data.ts,
+    librariesCount: parsedInput.data.libraries.length,
+  };
 
   const enqueueEvent = options.enqueueEvent ?? defaultEnqueueLibraryUsageEvent;
 
@@ -430,17 +571,14 @@ export async function logLibraryUsage(
       replayProtection,
       candidateEvents.map((candidate) => candidate.fingerprint)
     );
-    return {
-      status: "rejected",
-      reason: "guardrail_failure",
-    };
+    return reject("guardrail_failure", parsedAuditContext);
   }
 
   if (candidateEvents.length === 0) {
-    return {
-      status: "rejected",
-      reason: "duplicate_event",
-    };
+    return reject("duplicate_event", {
+      ...parsedAuditContext,
+      candidateEventsCount: 0,
+    });
   }
 
   let allowedByRateLimit: boolean;
@@ -458,10 +596,10 @@ export async function logLibraryUsage(
       replayProtection,
       candidateEvents.map((candidate) => candidate.fingerprint)
     );
-    return {
-      status: "rejected",
-      reason: "guardrail_failure",
-    };
+    return reject("guardrail_failure", {
+      ...parsedAuditContext,
+      candidateEventsCount: candidateEvents.length,
+    });
   }
 
   if (!allowedByRateLimit) {
@@ -470,15 +608,15 @@ export async function logLibraryUsage(
       candidateEvents.map((candidate) => candidate.fingerprint)
     );
     if (!released) {
-      return {
-        status: "rejected",
-        reason: "guardrail_failure",
-      };
+      return reject("guardrail_failure", {
+        ...parsedAuditContext,
+        candidateEventsCount: candidateEvents.length,
+      });
     }
-    return {
-      status: "rejected",
-      reason: "rate_limited",
-    };
+    return reject("rate_limited", {
+      ...parsedAuditContext,
+      candidateEventsCount: candidateEvents.length,
+    });
   }
 
   let recordedCount = 0;
@@ -512,26 +650,26 @@ export async function logLibraryUsage(
           rateLimitWindowMs
         );
       } catch {
-        return {
-          status: "rejected",
-          reason: "guardrail_failure",
-          recorded_count: recordedCount,
-        };
+        return reject("guardrail_failure", {
+          ...parsedAuditContext,
+          candidateEventsCount: candidateEvents.length,
+          recordedCount,
+        });
       }
 
       if (!released) {
-        return {
-          status: "rejected",
-          reason: "guardrail_failure",
-          recorded_count: recordedCount,
-        };
+        return reject("guardrail_failure", {
+          ...parsedAuditContext,
+          candidateEventsCount: candidateEvents.length,
+          recordedCount,
+        });
       }
 
-      return {
-        status: "rejected",
-        reason: "enqueue_failed",
-        recorded_count: recordedCount,
-      };
+      return reject("enqueue_failed", {
+        ...parsedAuditContext,
+        candidateEventsCount: candidateEvents.length,
+        recordedCount,
+      });
     }
   }
 

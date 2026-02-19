@@ -1,1 +1,5 @@
-export { clearLibraryUsageEvents, getLibraryUsageEvents } from "./log-library-usage.js";
+export {
+  clearLibraryUsageEvents,
+  getLibraryUsageEvents,
+  getLibraryUsageRejectionAudits,
+} from "./log-library-usage.js";

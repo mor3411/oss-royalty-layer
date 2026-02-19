@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { logLibraryUsage, MAX_LIBRARIES_PER_CALL } from "../src/tools/log-library-usage.js";
-import { clearLibraryUsageEvents, getLibraryUsageEvents } from "../src/tools/testing.js";
+import {
+  clearLibraryUsageEvents,
+  getLibraryUsageEvents,
+  getLibraryUsageRejectionAudits,
+} from "../src/tools/testing.js";
 
 const SESSION_IDS = {
   one: "a".repeat(64),
@@ -311,6 +315,63 @@ describe("logLibraryUsage", () => {
     });
   });
 
+  it("audits rate-limited rejection metadata", async () => {
+    const firstInput = {
+      session_id: SESSION_IDS.six,
+      source: "api",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries: [
+        {
+          name: "zod",
+          ecosystem: "npm",
+          version: "3.23.8",
+          calls: 1,
+        },
+      ],
+    };
+
+    const secondInput = {
+      ...firstInput,
+      libraries: [
+        {
+          name: "redis",
+          ecosystem: "npm",
+          version: "4.0.0",
+          calls: 1,
+        },
+      ],
+    };
+
+    await logLibraryUsage(firstInput, {
+      now: () => 0,
+      rateLimitWindowMs: 60_000,
+      maxRequestsPerWindow: 1,
+    });
+    const rejected = await logLibraryUsage(secondInput, {
+      now: () => 1_000,
+      rateLimitWindowMs: 60_000,
+      maxRequestsPerWindow: 1,
+    });
+
+    const audits = getLibraryUsageRejectionAudits();
+
+    expect(rejected).toEqual({
+      status: "rejected",
+      reason: "rate_limited",
+    });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      observed_at: "1970-01-01T00:00:01.000Z",
+      runtime_environment: "test",
+      reason: "rate_limited",
+      session_id: SESSION_IDS.six,
+      source: "api",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries_count: 1,
+      candidate_events_count: 1,
+    });
+  });
+
   it("rejects first request when libraries exceed per-window cap", async () => {
     const result = await logLibraryUsage(
       {
@@ -610,5 +671,25 @@ describe("logLibraryUsage", () => {
     });
     expect(replayProtection.release).toHaveBeenCalledTimes(1);
     expect(reservedFingerprints.size).toBe(0);
+  });
+
+  it("fails closed when rejection audit sink throws", async () => {
+    const auditRejection = vi.fn().mockRejectedValue(new Error("audit backend unavailable"));
+
+    const result = await logLibraryUsage(
+      {
+        session_id: SESSION_IDS.one,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [],
+      },
+      { auditRejection }
+    );
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "guardrail_failure",
+    });
+    expect(auditRejection).toHaveBeenCalledTimes(1);
   });
 });
