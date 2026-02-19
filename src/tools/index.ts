@@ -182,3 +182,16 @@ export type {
   PayoutBatchEntry,
   PayoutBatchFlag,
 } from "./create-payout-batch.js";
+
+export {
+  DEFAULT_PAYOUT_ANOMALY_CONFIG,
+  PayoutAnomalyCodeSchema,
+  detectPayoutAnomalies,
+} from "./payout-anomaly-detector.js";
+export type {
+  DetectPayoutAnomaliesConfig,
+  DetectPayoutAnomaliesInput,
+  DetectPayoutAnomaliesResult,
+  PayoutAnomalyCode,
+  PayoutAnomalySignal,
+} from "./payout-anomaly-detector.js";
