@@ -1,17 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import {
   LibraryUsageLoggedEnvelopeSchema,
   type LibraryUsageEventStore,
 } from "./library-usage-ingestion.js";
-import {
-  createInMemoryLibraryRegistry,
-  type CanonicalLibraryReference,
-  type LibraryIdResolver,
-} from "./library-registry.js";
+import { type CanonicalLibraryReference, type LibraryIdResolver, toCanonicalLibraryId } from "./library-registry.js";
 
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1000;
+const AGGREGATION_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
+const MAX_AGGREGATION_SNAPSHOTS = 256;
 
 export const AggregateUsageForPeriodInputSchema = z
   .object({
@@ -43,11 +42,20 @@ export type AggregateUsageForPeriodOutput = z.infer<typeof AggregateUsageForPeri
 type AggregateUsageForPeriodOptions = {
   eventStore: LibraryUsageEventStore;
   resolveLibraryId?: LibraryIdResolver;
+  now?: () => number;
 };
 
 type AggregationCursor = {
+  snapshot_id: string;
   offset: number;
 };
+
+type AggregationSnapshot = {
+  aggregates: AggregatedLibraryUsage[];
+  expiresAtMs: number;
+};
+
+const aggregationSnapshotStore = new Map<string, AggregationSnapshot>();
 
 function encodeCursor(cursor: AggregationCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
@@ -62,7 +70,12 @@ function decodeCursor(cursor: string): AggregationCursor {
     throw new Error("invalid cursor");
   }
 
-  const parsedCursor = z.object({ offset: z.number().int().nonnegative() }).safeParse(parsedValue);
+  const parsedCursor = z
+    .object({
+      snapshot_id: z.string().uuid(),
+      offset: z.number().int().nonnegative(),
+    })
+    .safeParse(parsedValue);
   if (!parsedCursor.success) {
     throw new Error("invalid cursor");
   }
@@ -70,22 +83,42 @@ function decodeCursor(cursor: string): AggregationCursor {
   return parsedCursor.data;
 }
 
-const defaultRegistry = createInMemoryLibraryRegistry();
+function cleanupAggregationSnapshots(nowMs: number): void {
+  for (const [snapshotId, snapshot] of aggregationSnapshotStore) {
+    if (snapshot.expiresAtMs <= nowMs) {
+      aggregationSnapshotStore.delete(snapshotId);
+    }
+  }
 
-export async function aggregateUsageForPeriod(
-  input: unknown,
-  options: AggregateUsageForPeriodOptions
-): Promise<AggregateUsageForPeriodOutput> {
-  const parsedInput = AggregateUsageForPeriodInputSchema.parse(input);
-  const allEnvelopes = await options.eventStore.readAll();
+  while (aggregationSnapshotStore.size > MAX_AGGREGATION_SNAPSHOTS) {
+    const oldest = aggregationSnapshotStore.keys().next().value;
+    if (!oldest) {
+      break;
+    }
+    aggregationSnapshotStore.delete(oldest);
+  }
+}
+
+function storeSnapshot(aggregates: AggregatedLibraryUsage[], nowMs: number): string {
+  cleanupAggregationSnapshots(nowMs);
+  const snapshotId = randomUUID();
+  aggregationSnapshotStore.set(snapshotId, {
+    aggregates,
+    expiresAtMs: nowMs + AGGREGATION_SNAPSHOT_TTL_MS,
+  });
+  return snapshotId;
+}
+
+async function buildAggregates(
+  parsedInput: AggregateUsageForPeriodInput,
+  eventStore: LibraryUsageEventStore,
+  resolveLibraryId: LibraryIdResolver
+): Promise<AggregatedLibraryUsage[]> {
+  const allEnvelopes = await eventStore.readAll();
   const envelopes = allEnvelopes.map((event) => LibraryUsageLoggedEnvelopeSchema.parse(event));
 
   const periodStartMs = Date.parse(parsedInput.period_start);
   const periodEndMs = Date.parse(parsedInput.period_end);
-  const libraryIdResolver =
-    options.resolveLibraryId ??
-    ((reference: CanonicalLibraryReference) => defaultRegistry.resolveLibraryId(reference).library_id);
-
   const byLibrary = new Map<string, { totalCalls: number; sessionIds: Set<string> }>();
 
   for (const envelope of envelopes) {
@@ -94,7 +127,7 @@ export async function aggregateUsageForPeriod(
       continue;
     }
 
-    const libraryId = await libraryIdResolver({
+    const libraryId = await resolveLibraryId({
       ecosystem: envelope.event.library.ecosystem,
       name: envelope.event.library.name,
     });
@@ -108,25 +141,72 @@ export async function aggregateUsageForPeriod(
     byLibrary.set(libraryId, existing);
   }
 
-  const sortedAggregates: AggregatedLibraryUsage[] = [...byLibrary.entries()]
+  return [...byLibrary.entries()]
     .map(([libraryId, aggregate]) => ({
       library_id: libraryId,
       total_calls: aggregate.totalCalls,
       unique_sessions: aggregate.sessionIds.size,
     }))
     .sort((a, b) => a.library_id.localeCompare(b.library_id));
+}
 
-  const offset = parsedInput.cursor ? decodeCursor(parsedInput.cursor).offset : 0;
-  if (offset > sortedAggregates.length) {
+export async function aggregateUsageForPeriod(
+  input: unknown,
+  options: AggregateUsageForPeriodOptions
+): Promise<AggregateUsageForPeriodOutput> {
+  const parsedInput = AggregateUsageForPeriodInputSchema.parse(input);
+  const nowMs = options.now?.() ?? Date.now();
+  cleanupAggregationSnapshots(nowMs);
+
+  const resolveLibraryId =
+    options.resolveLibraryId ??
+    ((reference: CanonicalLibraryReference) => toCanonicalLibraryId(reference));
+
+  const decodedCursor = parsedInput.cursor ? decodeCursor(parsedInput.cursor) : null;
+
+  let aggregatesSource: AggregatedLibraryUsage[];
+  let snapshotIdForNextPage: string | null = null;
+  let offset = 0;
+
+  if (decodedCursor) {
+    const snapshot = aggregationSnapshotStore.get(decodedCursor.snapshot_id);
+    if (!snapshot || snapshot.expiresAtMs <= nowMs) {
+      aggregationSnapshotStore.delete(decodedCursor.snapshot_id);
+      throw new Error("invalid or expired cursor");
+    }
+    snapshot.expiresAtMs = nowMs + AGGREGATION_SNAPSHOT_TTL_MS;
+    aggregatesSource = snapshot.aggregates;
+    snapshotIdForNextPage = decodedCursor.snapshot_id;
+    offset = decodedCursor.offset;
+  } else {
+    aggregatesSource = await buildAggregates(parsedInput, options.eventStore, resolveLibraryId);
+  }
+
+  if (offset > aggregatesSource.length) {
     throw new Error("cursor offset is out of bounds");
   }
 
-  const pageEnd = Math.min(offset + parsedInput.page_size, sortedAggregates.length);
-  const aggregates = sortedAggregates.slice(offset, pageEnd);
-  const nextCursor = pageEnd < sortedAggregates.length ? encodeCursor({ offset: pageEnd }) : undefined;
+  const pageEnd = Math.min(offset + parsedInput.page_size, aggregatesSource.length);
+  const aggregates = aggregatesSource.slice(offset, pageEnd);
+
+  if (pageEnd >= aggregatesSource.length) {
+    if (snapshotIdForNextPage) {
+      aggregationSnapshotStore.delete(snapshotIdForNextPage);
+    }
+    return { aggregates };
+  }
+
+  if (!snapshotIdForNextPage) {
+    snapshotIdForNextPage = storeSnapshot(aggregatesSource, nowMs);
+  }
+
+  const nextCursor = encodeCursor({
+    snapshot_id: snapshotIdForNextPage,
+    offset: pageEnd,
+  });
 
   return {
     aggregates,
-    ...(nextCursor ? { next_cursor: nextCursor } : {}),
+    next_cursor: nextCursor,
   };
 }

@@ -139,16 +139,16 @@ export function createLibraryUsageIngestionPipeline(
   const enqueueEvent: EnqueueLibraryUsageEvent = async (event) => {
     metrics.events_received += 1;
 
-    const nowMs = now();
-    const parsedEvent = LibraryUsageLoggedEventSchema.parse(event);
-    const envelope: LibraryUsageLoggedEnvelope = {
-      event_id: eventIdGenerator(parsedEvent, ingestIndex, nowMs),
-      ingested_at: new Date(nowMs).toISOString(),
-      event: parsedEvent,
-    };
-    ingestIndex += 1;
-
     try {
+      const nowMs = now();
+      const parsedEvent = LibraryUsageLoggedEventSchema.parse(event);
+      const envelope: LibraryUsageLoggedEnvelope = {
+        event_id: eventIdGenerator(parsedEvent, ingestIndex, nowMs),
+        ingested_at: new Date(nowMs).toISOString(),
+        event: parsedEvent,
+      };
+      ingestIndex += 1;
+
       await eventStore.append(envelope);
       metrics.events_persisted += 1;
       metrics.last_event_id = envelope.event_id;

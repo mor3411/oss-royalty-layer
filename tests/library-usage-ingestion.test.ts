@@ -69,4 +69,28 @@ describe("library usage ingestion pipeline", () => {
     expect(restored[0]?.event).toEqual(sampleEvent);
     expect(restored[0]?.ingested_at).toBe("2026-02-19T22:02:00.000Z");
   });
+
+  it("counts schema parse failures in ingestion metrics", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+
+    await expect(
+      pipeline.enqueueEvent({
+        session_id: "a".repeat(64),
+        source: "api",
+        ts: "2026-02-19T22:00:00.000Z",
+        library: {
+          name: "zod",
+          ecosystem: "npm",
+          version: "3.23.8",
+          calls: -1,
+        },
+      })
+    ).rejects.toThrowError();
+
+    expect(pipeline.getMetrics()).toMatchObject({
+      events_received: 1,
+      events_persisted: 0,
+      events_failed: 1,
+    });
+  });
 });

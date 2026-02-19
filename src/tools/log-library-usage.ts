@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import { z } from "zod";
 
 import { EcosystemSchema, UsageSourceSchema } from "../domain/index.js";
@@ -13,6 +15,8 @@ export const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 export const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 export const DEFAULT_MAX_LIBRARIES_PER_WINDOW = 10_000;
 export const IN_MEMORY_CLEANUP_INTERVAL_MS = 1_000;
+export const DEFAULT_REJECTION_AUDIT_TTL_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_REJECTION_AUDIT_LOG_PATH = ".data/library-usage-rejection-audits.ndjson";
 
 const SESSION_ID_REGEX = /^[a-f0-9]{32,128}$/;
 const RuntimeEnvironmentSchema = z.enum(["development", "test", "production"]);
@@ -108,6 +112,7 @@ export type LogLibraryUsageOptions = {
   replayProtection?: ReplayProtection;
   rateLimiter?: SessionRateLimiter;
   auditRejection?: AuditLibraryUsageRejection;
+  rejectionAuditFilePath?: string;
   allowInMemoryGuardsInProduction?: boolean;
   runtimeEnvironment?: "development" | "test" | "production";
 };
@@ -116,6 +121,7 @@ const inMemoryLibraryUsageEvents: LibraryUsageLoggedEvent[] = [];
 const inMemoryLibraryUsageRejectionAudits: LibraryUsageRejectionAudit[] = [];
 const replayCache = new Map<string, number>();
 let lastReplayCacheCleanupMs = Number.NEGATIVE_INFINITY;
+let lastRejectionAuditCleanupMs = Number.NEGATIVE_INFINITY;
 const sessionRateLimitState = new Map<
   string,
   {
@@ -156,6 +162,7 @@ export function clearLibraryUsageEvents(): void {
   inMemoryLibraryUsageRejectionAudits.length = 0;
   replayCache.clear();
   lastReplayCacheCleanupMs = Number.NEGATIVE_INFINITY;
+  lastRejectionAuditCleanupMs = Number.NEGATIVE_INFINITY;
   sessionRateLimitState.clear();
   lastRateLimitCleanupMs = Number.NEGATIVE_INFINITY;
 }
@@ -176,10 +183,36 @@ function defaultEnqueueLibraryUsageEvent(event: LibraryUsageLoggedEvent): void {
 }
 
 function defaultAuditLibraryUsageRejection(event: LibraryUsageRejectionAudit): void {
+  cleanupRejectionAuditStore(Date.parse(event.observed_at), DEFAULT_REJECTION_AUDIT_TTL_MS);
+
   while (inMemoryLibraryUsageRejectionAudits.length >= MAX_IN_MEMORY_REJECTION_AUDITS) {
     inMemoryLibraryUsageRejectionAudits.shift();
   }
   inMemoryLibraryUsageRejectionAudits.push(event);
+}
+
+function cleanupRejectionAuditStore(nowMs: number, ttlMs: number): void {
+  if (nowMs - lastRejectionAuditCleanupMs < IN_MEMORY_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+  lastRejectionAuditCleanupMs = nowMs;
+
+  const retained = inMemoryLibraryUsageRejectionAudits.filter((audit) => {
+    const observedAtMs = Date.parse(audit.observed_at);
+    return nowMs - observedAtMs <= ttlMs;
+  });
+  inMemoryLibraryUsageRejectionAudits.splice(
+    0,
+    inMemoryLibraryUsageRejectionAudits.length,
+    ...retained
+  );
+}
+
+function createNdjsonAuditSink(filePath: string): AuditLibraryUsageRejection {
+  return async (event: LibraryUsageRejectionAudit) => {
+    await mkdir(dirname(filePath), { recursive: true });
+    await appendFile(filePath, `${JSON.stringify(event)}\n`, "utf8");
+  };
 }
 
 function getRejectionReason(
@@ -442,7 +475,11 @@ export async function logLibraryUsage(
   const runtimeEnvironment = resolveRuntimeEnvironment(options.runtimeEnvironment);
   const replayProtection = options.replayProtection ?? inMemoryReplayProtection;
   const rateLimiter = options.rateLimiter ?? inMemorySessionRateLimiter;
-  const auditRejection = options.auditRejection ?? defaultAuditLibraryUsageRejection;
+  const defaultAuditRejection =
+    runtimeEnvironment === "test"
+      ? defaultAuditLibraryUsageRejection
+      : createNdjsonAuditSink(options.rejectionAuditFilePath ?? DEFAULT_REJECTION_AUDIT_LOG_PATH);
+  const auditRejection = options.auditRejection ?? defaultAuditRejection;
   const usesInMemoryGuardrails =
     replayProtection === inMemoryReplayProtection ||
     rateLimiter === inMemorySessionRateLimiter ||

@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { logLibraryUsage, MAX_LIBRARIES_PER_CALL } from "../src/tools/log-library-usage.js";
+import {
+  DEFAULT_REJECTION_AUDIT_TTL_MS,
+  logLibraryUsage,
+  MAX_LIBRARIES_PER_CALL,
+} from "../src/tools/log-library-usage.js";
 import {
   clearLibraryUsageEvents,
   getLibraryUsageEvents,
@@ -372,6 +376,37 @@ describe("logLibraryUsage", () => {
     });
   });
 
+  it("prunes stale in-memory rejection audits beyond TTL", async () => {
+    await logLibraryUsage(
+      {
+        session_id: "invalid",
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [],
+      },
+      {
+        now: () => 0,
+      }
+    );
+
+    await logLibraryUsage(
+      {
+        session_id: "invalid",
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [],
+      },
+      {
+        now: () => DEFAULT_REJECTION_AUDIT_TTL_MS + 2_000,
+      }
+    );
+
+    const audits = getLibraryUsageRejectionAudits();
+
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.observed_at).toBe("1970-01-02T00:00:02.000Z");
+  });
+
   it("rejects first request when libraries exceed per-window cap", async () => {
     const result = await logLibraryUsage(
       {
@@ -533,6 +568,7 @@ describe("logLibraryUsage", () => {
     vi.stubEnv("NODE_ENV", "production");
 
     try {
+      const auditRejection = vi.fn();
       const input = {
         session_id: SESSION_IDS.six,
         source: "api",
@@ -547,9 +583,12 @@ describe("logLibraryUsage", () => {
         ],
       };
 
-      const rejected = await logLibraryUsage(input);
+      const rejected = await logLibraryUsage(input, {
+        auditRejection,
+      });
       const allowed = await logLibraryUsage(input, {
         allowInMemoryGuardsInProduction: true,
+        auditRejection,
       });
 
       expect(rejected).toEqual({
@@ -566,7 +605,7 @@ describe("logLibraryUsage", () => {
     }
   });
 
-  it("rejects in production when in-memory rejection audit is used without explicit opt-in", async () => {
+  it("allows production calls with custom guardrail adapters and durable audit sink", async () => {
     vi.stubEnv("NODE_ENV", "production");
 
     const replayProtection = {
@@ -595,21 +634,22 @@ describe("logLibraryUsage", () => {
         ],
       };
 
-      const rejected = await logLibraryUsage(input, {
+      const first = await logLibraryUsage(input, {
         replayProtection,
         rateLimiter,
+        rejectionAuditFilePath: ".data/test-library-usage-rejection-audits.ndjson",
       });
-      const allowed = await logLibraryUsage(input, {
+      const second = await logLibraryUsage(input, {
         replayProtection,
         rateLimiter,
-        allowInMemoryGuardsInProduction: true,
+        rejectionAuditFilePath: ".data/test-library-usage-rejection-audits.ndjson",
       });
 
-      expect(rejected).toEqual({
-        status: "rejected",
-        reason: "guardrails_not_configured",
+      expect(first).toEqual({
+        status: "ok",
+        recorded_count: 1,
       });
-      expect(allowed).toEqual({
+      expect(second).toEqual({
         status: "ok",
         recorded_count: 1,
       });
@@ -623,19 +663,23 @@ describe("logLibraryUsage", () => {
     vi.stubEnv("NODE_ENV", undefined);
 
     try {
-      const result = await logLibraryUsage({
-        session_id: SESSION_IDS.one,
-        source: "api",
-        ts: "2026-02-17T12:00:00.000Z",
-        libraries: [
-          {
-            name: "zod",
-            ecosystem: "npm",
-            version: "3.23.8",
-            calls: 1,
-          },
-        ],
-      });
+      const auditRejection = vi.fn();
+      const result = await logLibraryUsage(
+        {
+          session_id: SESSION_IDS.one,
+          source: "api",
+          ts: "2026-02-17T12:00:00.000Z",
+          libraries: [
+            {
+              name: "zod",
+              ecosystem: "npm",
+              version: "3.23.8",
+              calls: 1,
+            },
+          ],
+        },
+        { auditRejection }
+      );
 
       expect(result).toEqual({
         status: "rejected",

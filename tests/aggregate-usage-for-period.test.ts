@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { aggregateUsageForPeriod } from "../src/tools/aggregate-usage-for-period.js";
 import {
@@ -134,6 +134,13 @@ describe("aggregateUsageForPeriod", () => {
       },
     });
 
+    const eventStore = {
+      readAll: vi.fn(async () => pipeline.readIngestedEvents()),
+      append: () => {
+        throw new Error("not used in aggregation");
+      },
+    };
+
     const firstPage = await aggregateUsageForPeriod(
       {
         period_start: "2026-02-19T00:00:00.000Z",
@@ -141,12 +148,7 @@ describe("aggregateUsageForPeriod", () => {
         page_size: 1,
       },
       {
-        eventStore: {
-          readAll: pipeline.readIngestedEvents,
-          append: () => {
-            throw new Error("not used in aggregation");
-          },
-        },
+        eventStore,
         resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
       }
     );
@@ -162,18 +164,14 @@ describe("aggregateUsageForPeriod", () => {
         cursor: firstPage.next_cursor,
       },
       {
-        eventStore: {
-          readAll: pipeline.readIngestedEvents,
-          append: () => {
-            throw new Error("not used in aggregation");
-          },
-        },
+        eventStore,
         resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
       }
     );
 
     expect(secondPage.aggregates).toHaveLength(1);
     expect(secondPage.next_cursor).toBeUndefined();
+    expect(eventStore.readAll).toHaveBeenCalledTimes(1);
 
     await expect(
       aggregateUsageForPeriod(
@@ -183,12 +181,7 @@ describe("aggregateUsageForPeriod", () => {
           cursor: "not-a-valid-cursor",
         },
         {
-          eventStore: {
-            readAll: pipeline.readIngestedEvents,
-            append: () => {
-              throw new Error("not used in aggregation");
-            },
-          },
+          eventStore,
           resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
         }
       )
