@@ -1,4 +1,13 @@
 import { z } from "zod";
+import {
+  assertToolAuthorized,
+  type AuthorizationRuntimeEnvironment,
+} from "./authz.js";
+import {
+  assertToolInputVetting,
+  assertToolOutputSanity,
+  assertToolRiskAllowed,
+} from "./guardrails.js";
 
 const INVALID_CONSTRAINTS_PAYLOAD_MESSAGE = "invalid allocation constraint payload";
 const SAFE_INTEGER_SCHEMA = z.number().int().safe();
@@ -19,6 +28,7 @@ export const ValidateAllocationConstraintsInputSchema = z.object({
 
 export const AllocationConstraintViolationSchema = z.object({
   code: z.enum([
+    "authorization_failed",
     "schema_validation_failed",
     "negative_amount",
     "pool_sum_mismatch",
@@ -42,6 +52,11 @@ export type AllocationConstraintViolation = z.infer<typeof AllocationConstraintV
 export type ValidateAllocationConstraintsResult = z.infer<
   typeof ValidateAllocationConstraintsResultSchema
 >;
+export type ValidateAllocationConstraintsOptions = {
+  principal?: unknown;
+  runtimeEnvironment?: AuthorizationRuntimeEnvironment;
+  allowTestAuthBypass?: boolean;
+};
 
 function formatMinorRatio(amountMinor: number, poolAmountMinor: number): number {
   if (poolAmountMinor === 0) {
@@ -59,11 +74,44 @@ function toSafeIntegerSum(left: number, right: number): number | null {
 }
 
 export function validateAllocationConstraints(
-  input: unknown
+  input: unknown,
+  options: ValidateAllocationConstraintsOptions = {}
 ): ValidateAllocationConstraintsResult {
-  const parsedInput = ValidateAllocationConstraintsInputSchema.safeParse(input);
-  if (!parsedInput.success) {
-    return {
+  try {
+    assertToolAuthorized({
+      toolName: "validate_allocation_constraints",
+      ...(options.principal === undefined ? {} : { principal: options.principal }),
+      ...(options.runtimeEnvironment === undefined
+        ? {}
+        : { runtimeEnvironment: options.runtimeEnvironment }),
+      ...(options.allowTestAuthBypass === undefined
+        ? {}
+        : { allowTestBypass: options.allowTestAuthBypass }),
+    });
+  } catch {
+    const rejectedResult: ValidateAllocationConstraintsResult = {
+      status: "invalid",
+      total_allocated_minor: 0,
+      expected_pool_minor: 1,
+      violations: [
+        {
+          code: "authorization_failed",
+          message: "allocation constraint authorization failed",
+        },
+      ],
+    };
+    assertToolOutputSanity("validate_allocation_constraints", rejectedResult);
+    return rejectedResult;
+  }
+
+  try {
+    assertToolRiskAllowed({
+      toolName: "validate_allocation_constraints",
+      maxAllowedRisk: "medium",
+    });
+    assertToolInputVetting("validate_allocation_constraints", input);
+  } catch {
+    const rejectedResult: ValidateAllocationConstraintsResult = {
       status: "invalid",
       total_allocated_minor: 0,
       expected_pool_minor: 1,
@@ -74,6 +122,25 @@ export function validateAllocationConstraints(
         },
       ],
     };
+    assertToolOutputSanity("validate_allocation_constraints", rejectedResult);
+    return rejectedResult;
+  }
+
+  const parsedInput = ValidateAllocationConstraintsInputSchema.safeParse(input);
+  if (!parsedInput.success) {
+    const rejectedResult: ValidateAllocationConstraintsResult = {
+      status: "invalid",
+      total_allocated_minor: 0,
+      expected_pool_minor: 1,
+      violations: [
+        {
+          code: "schema_validation_failed",
+          message: INVALID_CONSTRAINTS_PAYLOAD_MESSAGE,
+        },
+      ],
+    };
+    assertToolOutputSanity("validate_allocation_constraints", rejectedResult);
+    return rejectedResult;
   }
 
   const values = parsedInput.data;
@@ -84,7 +151,7 @@ export function validateAllocationConstraints(
   for (const allocation of values.allocations) {
     const nextTotalAllocatedMinor = toSafeIntegerSum(totalAllocatedMinor, allocation.amount_minor);
     if (nextTotalAllocatedMinor === null) {
-      return {
+      const rejectedResult: ValidateAllocationConstraintsResult = {
         status: "invalid",
         total_allocated_minor: 0,
         expected_pool_minor: values.pool_amount_minor,
@@ -95,6 +162,8 @@ export function validateAllocationConstraints(
           },
         ],
       };
+      assertToolOutputSanity("validate_allocation_constraints", rejectedResult);
+      return rejectedResult;
     }
     totalAllocatedMinor = nextTotalAllocatedMinor;
 
@@ -110,7 +179,7 @@ export function validateAllocationConstraints(
     const currentLibraryAmount = byLibrary.get(allocation.library_id) ?? 0;
     const nextLibraryAmount = toSafeIntegerSum(currentLibraryAmount, allocation.amount_minor);
     if (nextLibraryAmount === null) {
-      return {
+      const rejectedResult: ValidateAllocationConstraintsResult = {
         status: "invalid",
         total_allocated_minor: 0,
         expected_pool_minor: values.pool_amount_minor,
@@ -121,6 +190,8 @@ export function validateAllocationConstraints(
           },
         ],
       };
+      assertToolOutputSanity("validate_allocation_constraints", rejectedResult);
+      return rejectedResult;
     }
 
     byLibrary.set(allocation.library_id, nextLibraryAmount);
@@ -148,16 +219,21 @@ export function validateAllocationConstraints(
     }
   }
 
-  return {
+  const result: ValidateAllocationConstraintsResult = {
     status: violations.length === 0 ? "valid" : "invalid",
     total_allocated_minor: Math.max(0, totalAllocatedMinor),
     expected_pool_minor: values.pool_amount_minor,
     violations,
   };
+  assertToolOutputSanity("validate_allocation_constraints", result);
+  return result;
 }
 
-export function assertAllocationConstraints(input: unknown): void {
-  const result = validateAllocationConstraints(input);
+export function assertAllocationConstraints(
+  input: unknown,
+  options: ValidateAllocationConstraintsOptions = {}
+): void {
+  const result = validateAllocationConstraints(input, options);
   if (result.status === "valid") {
     return;
   }

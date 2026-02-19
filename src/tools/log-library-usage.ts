@@ -2,6 +2,13 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
+import {
+  DEFAULT_MAX_GUARDRAIL_INPUT_BYTES,
+  assertToolInputVetting,
+  assertToolOutputSanity,
+  assertToolRiskAllowed,
+  type ToolRiskLevel,
+} from "./guardrails.js";
 
 import { EcosystemSchema, UsageSourceSchema } from "../domain/index.js";
 
@@ -128,6 +135,8 @@ export type LogLibraryUsageOptions = {
   auditSinkFailureMode?: "fail_open" | "fail_closed";
   invalidRejectionAuditWindowMs?: number;
   maxInvalidRejectionAuditsPerWindow?: number;
+  maxGuardrailInputBytes?: number;
+  maxAllowedRisk?: ToolRiskLevel;
   allowInMemoryGuardsInProduction?: boolean;
   runtimeEnvironment?: "development" | "test" | "production";
 };
@@ -573,6 +582,21 @@ export async function logLibraryUsage(
   input: unknown,
   options: LogLibraryUsageOptions = {}
 ): Promise<LogLibraryUsageOutput> {
+  const finalizeOutput = (output: LogLibraryUsageOutput): LogLibraryUsageOutput => {
+    try {
+      assertToolOutputSanity("log_library_usage", output);
+      return output;
+    } catch {
+      return {
+        status: "rejected",
+        reason: "guardrail_failure",
+        ...(output.status === "rejected" && output.recorded_count !== undefined
+          ? { recorded_count: output.recorded_count }
+          : {}),
+      };
+    }
+  };
+
   const nowMs = options.now?.() ?? Date.now();
   const replayWindowMs = options.replayWindowMs ?? DEFAULT_REPLAY_WINDOW_MS;
   const rateLimitWindowMs = options.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
@@ -584,6 +608,8 @@ export async function logLibraryUsage(
     options.invalidRejectionAuditWindowMs ?? DEFAULT_INVALID_REJECTION_AUDIT_WINDOW_MS;
   const maxInvalidRejectionAuditsPerWindow =
     options.maxInvalidRejectionAuditsPerWindow ?? DEFAULT_MAX_INVALID_REJECTION_AUDITS_PER_WINDOW;
+  const maxGuardrailInputBytes =
+    options.maxGuardrailInputBytes ?? DEFAULT_MAX_GUARDRAIL_INPUT_BYTES;
   const auditSinkFailureMode = options.auditSinkFailureMode ?? "fail_open";
   const runtimeEnvironment = resolveRuntimeEnvironment(options.runtimeEnvironment);
   const replayProtection = options.replayProtection ?? inMemoryReplayProtection;
@@ -634,7 +660,7 @@ export async function logLibraryUsage(
       maxInvalidRejectionAuditsPerWindow
     );
     if (!shouldAudit) {
-      return rejectedOutput;
+      return finalizeOutput(rejectedOutput);
     }
 
     const auditEvent: LibraryUsageRejectionAudit = {
@@ -678,17 +704,29 @@ export async function logLibraryUsage(
         auditSinkFailureMode === "fail_open" &&
         isAuditSinkCapacityError(error)
       ) {
-        return rejectedOutput;
+        return finalizeOutput(rejectedOutput);
       }
-      return {
+      return finalizeOutput({
         status: "rejected",
         reason: "guardrail_failure",
         ...(context.recordedCount === undefined ? {} : { recorded_count: context.recordedCount }),
-      };
+      });
     }
 
-    return rejectedOutput;
+    return finalizeOutput(rejectedOutput);
   };
+
+  try {
+    assertToolRiskAllowed({
+      toolName: "log_library_usage",
+      ...(options.maxAllowedRisk === undefined ? {} : { maxAllowedRisk: options.maxAllowedRisk }),
+    });
+    assertToolInputVetting("log_library_usage", input, {
+      maxBytes: maxGuardrailInputBytes,
+    });
+  } catch {
+    return reject("guardrail_failure");
+  }
 
   if (
     !isPositiveInteger(replayWindowMs) ||
@@ -699,6 +737,7 @@ export async function logLibraryUsage(
     !isPositiveInteger(rejectionAuditMaxFiles) ||
     !isPositiveInteger(invalidRejectionAuditWindowMs) ||
     !isPositiveInteger(maxInvalidRejectionAuditsPerWindow) ||
+    !isPositiveInteger(maxGuardrailInputBytes) ||
     !AuditSinkFailureModeSchema.safeParse(auditSinkFailureMode).success
   ) {
     return reject("guardrail_failure");
@@ -863,8 +902,8 @@ export async function logLibraryUsage(
     }
   }
 
-  return {
+  return finalizeOutput({
     status: "ok",
     recorded_count: recordedCount,
-  };
+  });
 }

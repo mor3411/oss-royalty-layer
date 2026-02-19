@@ -202,4 +202,95 @@ describe("aggregateUsageForPeriod", () => {
       )
     ).rejects.toThrowError("invalid cursor");
   });
+
+  it("enforces guardrail risk allowance and maximum aggregation period", async () => {
+    const eventStore = {
+      readAll: () => [],
+      append: () => {
+        throw new Error("not used in aggregation");
+      },
+    };
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-02-01T00:00:00.000Z",
+          period_end: "2026-02-02T00:00:00.000Z",
+        },
+        {
+          eventStore,
+          maxAllowedRisk: "low",
+        }
+      )
+    ).rejects.toThrowError("requires medium risk allowance");
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-01-01T00:00:00.000Z",
+          period_end: "2026-02-15T00:00:00.000Z",
+        },
+        {
+          eventStore,
+          maxAggregationPeriodDays: 31,
+        }
+      )
+    ).rejects.toThrowError("aggregation period exceeds 31 days");
+  });
+
+  it("enforces authorization boundaries for internal aggregation tool access", async () => {
+    const eventStore = {
+      readAll: () => [],
+      append: () => {
+        throw new Error("not used in aggregation");
+      },
+    };
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-02-01T00:00:00.000Z",
+          period_end: "2026-02-02T00:00:00.000Z",
+        },
+        {
+          eventStore,
+          runtimeEnvironment: "production",
+          allowTestAuthBypass: false,
+        }
+      )
+    ).rejects.toThrowError("authorization required");
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-02-01T00:00:00.000Z",
+          period_end: "2026-02-02T00:00:00.000Z",
+        },
+        {
+          eventStore,
+          runtimeEnvironment: "production",
+          principal: {
+            principal_id: "viewer-1",
+            role: "viewer",
+          },
+        }
+      )
+    ).rejects.toThrowError("not authorized");
+
+    const allowed = await aggregateUsageForPeriod(
+      {
+        period_start: "2026-02-01T00:00:00.000Z",
+        period_end: "2026-02-02T00:00:00.000Z",
+      },
+      {
+        eventStore,
+        runtimeEnvironment: "production",
+        principal: {
+          principal_id: "analyst-1",
+          role: "analyst",
+        },
+      }
+    );
+    expect(allowed).toEqual({ aggregates: [] });
+  });
 });

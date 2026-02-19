@@ -1,4 +1,34 @@
 export {
+  AuthorizationRuntimeEnvironmentSchema,
+  DEFAULT_ALLOW_TEST_AUTH_BYPASS,
+  ToolPrincipalRoleSchema,
+  ToolPrincipalSchema,
+  assertToolAuthorized,
+  requiresToolAuthorization,
+} from "./authz.js";
+export type {
+  AuthorizationRuntimeEnvironment,
+  ToolPrincipal,
+  ToolPrincipalRole,
+} from "./authz.js";
+
+export {
+  DEFAULT_MAX_AGGREGATION_PERIOD_DAYS,
+  DEFAULT_MAX_GUARDRAIL_INPUT_BYTES,
+  MAX_GUARDRAIL_AGGREGATE_OUTPUT_ROWS,
+  GuardrailedToolNameSchema,
+  ToolRiskLevelSchema,
+  assertToolInputVetting,
+  assertToolOutputSanity,
+  assertToolRiskAllowed,
+  getToolRiskLevel,
+} from "./guardrails.js";
+export type {
+  GuardrailedToolName,
+  ToolRiskLevel,
+} from "./guardrails.js";
+
+export {
   AllocationConstraintCandidateSchema,
   AllocationConstraintViolationSchema,
   MAX_ALLOCATION_CANDIDATES,
@@ -11,6 +41,7 @@ export type {
   AllocationConstraintCandidate,
   AllocationConstraintViolation,
   ValidateAllocationConstraintsInput,
+  ValidateAllocationConstraintsOptions,
   ValidateAllocationConstraintsResult,
 } from "./allocation-constraints.js";
 

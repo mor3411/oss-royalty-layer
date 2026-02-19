@@ -150,4 +150,56 @@ describe("allocation constraints", () => {
       })
     ).toThrowError("allocation constraints violated");
   });
+
+  it("fails authorization for allocation validation in production without principal", () => {
+    const result = validateAllocationConstraints(
+      {
+        pool_amount_minor: 10_000,
+        allocations: [
+          {
+            library_id: "lib-a",
+            maintainer_id: "mnt-1",
+            amount_minor: 10_000,
+          },
+        ],
+      },
+      {
+        runtimeEnvironment: "production",
+        allowTestAuthBypass: false,
+      }
+    );
+
+    expect(result.status).toBe("invalid");
+    expect(result.violations[0]?.code).toBe("authorization_failed");
+  });
+
+  it("accepts authorized allocation validation in production", () => {
+    const result = validateAllocationConstraints(
+      {
+        pool_amount_minor: 10_000,
+        max_share_per_library: 1,
+        allocations: [
+          {
+            library_id: "lib-a",
+            maintainer_id: "mnt-1",
+            amount_minor: 10_000,
+          },
+        ],
+      },
+      {
+        runtimeEnvironment: "production",
+        principal: {
+          principal_id: "analyst-1",
+          role: "analyst",
+        },
+      }
+    );
+
+    expect(result).toEqual({
+      status: "valid",
+      total_allocated_minor: 10_000,
+      expected_pool_minor: 10_000,
+      violations: [],
+    });
+  });
 });

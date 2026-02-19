@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import {
+  assertToolAuthorized,
+  type AuthorizationRuntimeEnvironment,
+} from "./authz.js";
+import {
+  assertToolInputVetting,
+  assertToolOutputSanity,
+  assertToolRiskAllowed,
+  type ToolRiskLevel,
+} from "./guardrails.js";
 
 import {
   LibraryUsageLoggedEnvelopeSchema,
@@ -43,6 +53,11 @@ type AggregateUsageForPeriodOptions = {
   eventStore: LibraryUsageEventStore;
   resolveLibraryId?: LibraryIdResolver;
   now?: () => number;
+  maxAllowedRisk?: ToolRiskLevel;
+  maxAggregationPeriodDays?: number;
+  principal?: unknown;
+  runtimeEnvironment?: AuthorizationRuntimeEnvironment;
+  allowTestAuthBypass?: boolean;
 };
 
 type AggregationCursor = {
@@ -162,6 +177,27 @@ export async function aggregateUsageForPeriod(
   input: unknown,
   options: AggregateUsageForPeriodOptions
 ): Promise<AggregateUsageForPeriodOutput> {
+  assertToolAuthorized({
+    toolName: "aggregate_usage_for_period",
+    ...(options.principal === undefined ? {} : { principal: options.principal }),
+    ...(options.runtimeEnvironment === undefined
+      ? {}
+      : { runtimeEnvironment: options.runtimeEnvironment }),
+    ...(options.allowTestAuthBypass === undefined
+      ? {}
+      : { allowTestBypass: options.allowTestAuthBypass }),
+  });
+  assertToolRiskAllowed({
+    toolName: "aggregate_usage_for_period",
+    ...(options.maxAllowedRisk === undefined
+      ? {}
+      : { maxAllowedRisk: options.maxAllowedRisk }),
+  });
+  assertToolInputVetting("aggregate_usage_for_period", input, {
+    ...(options.maxAggregationPeriodDays === undefined
+      ? {}
+      : { maxAggregationPeriodDays: options.maxAggregationPeriodDays }),
+  });
   const parsedInput = AggregateUsageForPeriodInputSchema.parse(input);
   const nowMs = options.now?.() ?? Date.now();
   cleanupAggregationSnapshots(nowMs);
@@ -208,7 +244,9 @@ export async function aggregateUsageForPeriod(
     if (snapshotIdForNextPage) {
       aggregationSnapshotStore.delete(snapshotIdForNextPage);
     }
-    return { aggregates };
+    const output = { aggregates };
+    assertToolOutputSanity("aggregate_usage_for_period", output);
+    return output;
   }
 
   if (!snapshotIdForNextPage) {
@@ -221,8 +259,10 @@ export async function aggregateUsageForPeriod(
     query_hash: queryHash,
   });
 
-  return {
+  const output = {
     aggregates,
     next_cursor: nextCursor,
   };
+  assertToolOutputSanity("aggregate_usage_for_period", output);
+  return output;
 }
