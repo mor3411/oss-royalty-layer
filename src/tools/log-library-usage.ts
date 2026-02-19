@@ -13,6 +13,7 @@ export const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 export const DEFAULT_MAX_LIBRARIES_PER_WINDOW = 10_000;
 
 const SESSION_ID_REGEX = /^[a-f0-9]{32,128}$/;
+const RuntimeEnvironmentSchema = z.enum(["development", "test", "production"]);
 
 export const LibraryUsagePayloadSchema = z.object({
   name: z
@@ -31,11 +32,7 @@ export const LibraryUsagePayloadSchema = z.object({
 });
 
 export const LogLibraryUsageInputSchema = z.object({
-  session_id: z
-    .string()
-    .trim()
-    .toLowerCase()
-    .regex(SESSION_ID_REGEX),
+  session_id: z.string().trim().toLowerCase().regex(SESSION_ID_REGEX),
   source: z
     .string()
     .trim()
@@ -80,9 +77,7 @@ export type LogLibraryUsageInput = z.infer<typeof LogLibraryUsageInputSchema>;
 export type LogLibraryUsageOutput = z.infer<typeof LogLibraryUsageOutputSchema>;
 export type LibraryUsageLoggedEvent = z.infer<typeof LibraryUsageLoggedEventSchema>;
 
-export type EnqueueLibraryUsageEvent = (
-  event: LibraryUsageLoggedEvent
-) => Promise<void> | void;
+export type EnqueueLibraryUsageEvent = (event: LibraryUsageLoggedEvent) => Promise<void> | void;
 
 export type LogLibraryUsageOptions = {
   enqueueEvent?: EnqueueLibraryUsageEvent;
@@ -94,6 +89,7 @@ export type LogLibraryUsageOptions = {
   replayProtection?: ReplayProtection;
   rateLimiter?: SessionRateLimiter;
   allowInMemoryGuardsInProduction?: boolean;
+  runtimeEnvironment?: "development" | "test" | "production";
 };
 
 const inMemoryLibraryUsageEvents: LibraryUsageLoggedEvent[] = [];
@@ -149,10 +145,11 @@ function defaultEnqueueLibraryUsageEvent(event: LibraryUsageLoggedEvent): void {
   inMemoryLibraryUsageEvents.push(event);
 }
 
-function getRejectionReason(error: z.ZodError): "invalid_payload" | "too_many_libraries" | "no_libraries" {
+function getRejectionReason(
+  error: z.ZodError
+): "invalid_payload" | "too_many_libraries" | "no_libraries" {
   const hasTooManyLibrariesIssue = error.issues.some(
-    (issue) =>
-      issue.path.length === 1 && issue.path[0] === "libraries" && issue.code === "too_big"
+    (issue) => issue.path.length === 1 && issue.path[0] === "libraries" && issue.code === "too_big"
   );
   if (hasTooManyLibrariesIssue) {
     return "too_many_libraries";
@@ -211,6 +208,12 @@ function checkAndConsumeRateLimit(
 ): boolean {
   const existingState = sessionRateLimitState.get(sessionId);
   if (!existingState || nowMs - existingState.windowStartMs >= windowMs) {
+    if (1 > maxRequestsPerWindow) {
+      return false;
+    }
+    if (librariesCount > maxLibrariesPerWindow) {
+      return false;
+    }
     sessionRateLimitState.set(sessionId, {
       windowStartMs: nowMs,
       requests: 1,
@@ -259,6 +262,24 @@ function refundRateLimit(
 
 function fingerprintEvent(event: LibraryUsageLoggedEvent): string {
   return createHash("sha256").update(JSON.stringify(event)).digest("hex");
+}
+
+function isPositiveInteger(value: number): boolean {
+  return Number.isInteger(value) && value > 0;
+}
+
+function resolveRuntimeEnvironment(
+  override: LogLibraryUsageOptions["runtimeEnvironment"]
+): "development" | "test" | "production" {
+  if (override) {
+    return override;
+  }
+  const parsedEnvironment = RuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV);
+  if (parsedEnvironment.success) {
+    return parsedEnvironment.data;
+  }
+  // Unknown or missing runtime mode should fail closed.
+  return "production";
 }
 
 const inMemoryReplayProtection: ReplayProtection = {
@@ -330,17 +351,28 @@ export async function logLibraryUsage(
   const nowMs = options.now?.() ?? Date.now();
   const replayWindowMs = options.replayWindowMs ?? DEFAULT_REPLAY_WINDOW_MS;
   const rateLimitWindowMs = options.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
-  const maxRequestsPerWindow =
-    options.maxRequestsPerWindow ?? DEFAULT_MAX_REQUESTS_PER_WINDOW;
-  const maxLibrariesPerWindow =
-    options.maxLibrariesPerWindow ?? DEFAULT_MAX_LIBRARIES_PER_WINDOW;
+  const maxRequestsPerWindow = options.maxRequestsPerWindow ?? DEFAULT_MAX_REQUESTS_PER_WINDOW;
+  const maxLibrariesPerWindow = options.maxLibrariesPerWindow ?? DEFAULT_MAX_LIBRARIES_PER_WINDOW;
+  const runtimeEnvironment = resolveRuntimeEnvironment(options.runtimeEnvironment);
   const replayProtection = options.replayProtection ?? inMemoryReplayProtection;
   const rateLimiter = options.rateLimiter ?? inMemorySessionRateLimiter;
   const usesInMemoryGuardrails =
     replayProtection === inMemoryReplayProtection || rateLimiter === inMemorySessionRateLimiter;
 
   if (
-    process.env.NODE_ENV === "production" &&
+    !isPositiveInteger(replayWindowMs) ||
+    !isPositiveInteger(rateLimitWindowMs) ||
+    !isPositiveInteger(maxRequestsPerWindow) ||
+    !isPositiveInteger(maxLibrariesPerWindow)
+  ) {
+    return {
+      status: "rejected",
+      reason: "guardrail_failure",
+    };
+  }
+
+  if (
+    runtimeEnvironment === "production" &&
     usesInMemoryGuardrails &&
     !options.allowInMemoryGuardsInProduction
   ) {
