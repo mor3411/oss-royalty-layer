@@ -15,6 +15,10 @@ export type {
 } from "./allocation-constraints.js";
 
 export {
+  DEFAULT_INVALID_REJECTION_AUDIT_WINDOW_MS,
+  DEFAULT_MAX_INVALID_REJECTION_AUDITS_PER_WINDOW,
+  DEFAULT_REJECTION_AUDIT_MAX_BYTES,
+  DEFAULT_REJECTION_AUDIT_MAX_FILES,
   DEFAULT_REJECTION_AUDIT_LOG_PATH,
   DEFAULT_REJECTION_AUDIT_TTL_MS,
   DEFAULT_MAX_LIBRARIES_PER_WINDOW,
@@ -72,6 +76,7 @@ export {
   getInMemoryLibraryUsageIngestionEvents,
 } from "./library-usage-ingestion.js";
 export type {
+  NdjsonLibraryUsageEventStoreOptions,
   LibraryUsageEventStore,
   LibraryUsageIngestionMetrics,
   LibraryUsageIngestionPipeline,

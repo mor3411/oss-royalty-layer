@@ -31,6 +31,11 @@ export type LibraryUsageEventStore = {
   clear?: () => Promise<void> | void;
 };
 
+export type NdjsonLibraryUsageEventStoreOptions = {
+  strictRead?: boolean;
+  onInvalidLine?: (line: number, message: string) => void;
+};
+
 type LibraryUsageIngestionPipelineOptions = {
   eventStore?: LibraryUsageEventStore;
   now?: () => number;
@@ -87,7 +92,12 @@ export function getInMemoryLibraryUsageIngestionEvents(): LibraryUsageLoggedEnve
   return [...inMemoryIngestedEvents];
 }
 
-export function createNdjsonLibraryUsageEventStore(filePath: string): LibraryUsageEventStore {
+export function createNdjsonLibraryUsageEventStore(
+  filePath: string,
+  options: NdjsonLibraryUsageEventStoreOptions = {}
+): LibraryUsageEventStore {
+  const strictRead = options.strictRead ?? false;
+
   return {
     async append(envelope: LibraryUsageLoggedEnvelope): Promise<void> {
       await mkdir(dirname(filePath), { recursive: true });
@@ -110,14 +120,22 @@ export function createNdjsonLibraryUsageEventStore(filePath: string): LibraryUsa
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
 
-      return lines.map((line, index) => {
+      const parsedEnvelopes: LibraryUsageLoggedEnvelope[] = [];
+      lines.forEach((line, index) => {
         try {
           const parsed = JSON.parse(line) as unknown;
-          return LibraryUsageLoggedEnvelopeSchema.parse(parsed);
-        } catch {
-          throw new Error(`invalid envelope at line ${index + 1} in ${filePath}`);
+          parsedEnvelopes.push(LibraryUsageLoggedEnvelopeSchema.parse(parsed));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : `invalid envelope at line ${index + 1}`;
+          options.onInvalidLine?.(index + 1, message);
+          if (strictRead) {
+            throw new Error(`invalid envelope at line ${index + 1} in ${filePath}`);
+          }
         }
       });
+
+      return parsedEnvelopes;
     },
   };
 }

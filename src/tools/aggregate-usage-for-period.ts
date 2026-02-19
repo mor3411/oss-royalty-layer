@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import {
@@ -48,17 +48,23 @@ type AggregateUsageForPeriodOptions = {
 type AggregationCursor = {
   snapshot_id: string;
   offset: number;
+  query_hash: string;
 };
 
 type AggregationSnapshot = {
   aggregates: AggregatedLibraryUsage[];
   expiresAtMs: number;
+  queryHash: string;
 };
 
 const aggregationSnapshotStore = new Map<string, AggregationSnapshot>();
 
 function encodeCursor(cursor: AggregationCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function computeQueryHash(periodStart: string, periodEnd: string): string {
+  return createHash("sha256").update(periodStart).update(":").update(periodEnd).digest("hex");
 }
 
 function decodeCursor(cursor: string): AggregationCursor {
@@ -74,6 +80,7 @@ function decodeCursor(cursor: string): AggregationCursor {
     .object({
       snapshot_id: z.string().uuid(),
       offset: z.number().int().nonnegative(),
+      query_hash: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .safeParse(parsedValue);
   if (!parsedCursor.success) {
@@ -99,12 +106,13 @@ function cleanupAggregationSnapshots(nowMs: number): void {
   }
 }
 
-function storeSnapshot(aggregates: AggregatedLibraryUsage[], nowMs: number): string {
+function storeSnapshot(aggregates: AggregatedLibraryUsage[], nowMs: number, queryHash: string): string {
   cleanupAggregationSnapshots(nowMs);
   const snapshotId = randomUUID();
   aggregationSnapshotStore.set(snapshotId, {
     aggregates,
     expiresAtMs: nowMs + AGGREGATION_SNAPSHOT_TTL_MS,
+    queryHash,
   });
   return snapshotId;
 }
@@ -157,6 +165,7 @@ export async function aggregateUsageForPeriod(
   const parsedInput = AggregateUsageForPeriodInputSchema.parse(input);
   const nowMs = options.now?.() ?? Date.now();
   cleanupAggregationSnapshots(nowMs);
+  const queryHash = computeQueryHash(parsedInput.period_start, parsedInput.period_end);
 
   const resolveLibraryId =
     options.resolveLibraryId ??
@@ -169,10 +178,16 @@ export async function aggregateUsageForPeriod(
   let offset = 0;
 
   if (decodedCursor) {
+    if (decodedCursor.query_hash !== queryHash) {
+      throw new Error("cursor does not match query");
+    }
     const snapshot = aggregationSnapshotStore.get(decodedCursor.snapshot_id);
     if (!snapshot || snapshot.expiresAtMs <= nowMs) {
       aggregationSnapshotStore.delete(decodedCursor.snapshot_id);
       throw new Error("invalid or expired cursor");
+    }
+    if (snapshot.queryHash !== queryHash) {
+      throw new Error("cursor does not match query");
     }
     snapshot.expiresAtMs = nowMs + AGGREGATION_SNAPSHOT_TTL_MS;
     aggregatesSource = snapshot.aggregates;
@@ -197,12 +212,13 @@ export async function aggregateUsageForPeriod(
   }
 
   if (!snapshotIdForNextPage) {
-    snapshotIdForNextPage = storeSnapshot(aggregatesSource, nowMs);
+    snapshotIdForNextPage = storeSnapshot(aggregatesSource, nowMs, queryHash);
   }
 
   const nextCursor = encodeCursor({
     snapshot_id: snapshotIdForNextPage,
     offset: pageEnd,
+    query_hash: queryHash,
   });
 
   return {

@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   clearInMemoryLibraryUsageIngestionEvents,
@@ -92,5 +92,43 @@ describe("library usage ingestion pipeline", () => {
       events_persisted: 0,
       events_failed: 1,
     });
+  });
+
+  it("skips malformed NDJSON lines in tolerant read mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+    const invalidLineSpy = vi.fn();
+
+    const validEnvelope = {
+      event_id: "evt_123",
+      ingested_at: "2026-02-19T22:02:00.000Z",
+      event: sampleEvent,
+    };
+    await writeFile(filePath, `${JSON.stringify(validEnvelope)}\n{"bad-json":\n`, "utf8");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath, {
+      onInvalidLine: invalidLineSpy,
+    });
+    const restored = await store.readAll();
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.event_id).toBe("evt_123");
+    expect(invalidLineSpy).toHaveBeenCalledTimes(1);
+    expect(invalidLineSpy).toHaveBeenCalledWith(2, expect.any(String));
+  });
+
+  it("throws on malformed NDJSON lines in strict read mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+
+    await writeFile(filePath, `{"bad-json":\n`, "utf8");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath, {
+      strictRead: true,
+    });
+
+    await expect(store.readAll()).rejects.toThrowError("invalid envelope at line 1");
   });
 });

@@ -770,6 +770,93 @@ describe("logLibraryUsage", () => {
     expect(reservedFingerprints.size).toBe(0);
   });
 
+  it("throttles repetitive malformed-payload rejection audits", async () => {
+    const auditRejection = vi.fn().mockResolvedValue(undefined);
+    const payload = {
+      session_id: SESSION_IDS.one,
+      source: "api",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries: [],
+    };
+
+    const first = await logLibraryUsage(payload, {
+      auditRejection,
+      invalidRejectionAuditWindowMs: 60_000,
+      maxInvalidRejectionAuditsPerWindow: 1,
+    });
+    const second = await logLibraryUsage(payload, {
+      auditRejection,
+      invalidRejectionAuditWindowMs: 60_000,
+      maxInvalidRejectionAuditsPerWindow: 1,
+    });
+    const third = await logLibraryUsage(payload, {
+      auditRejection,
+      invalidRejectionAuditWindowMs: 60_000,
+      maxInvalidRejectionAuditsPerWindow: 1,
+    });
+
+    expect(first).toEqual({
+      status: "rejected",
+      reason: "no_libraries",
+    });
+    expect(second).toEqual({
+      status: "rejected",
+      reason: "no_libraries",
+    });
+    expect(third).toEqual({
+      status: "rejected",
+      reason: "no_libraries",
+    });
+    expect(auditRejection).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails open on audit sink capacity errors by default", async () => {
+    const capacityError = Object.assign(new Error("disk full"), {
+      code: "ENOSPC",
+    });
+    const auditRejection = vi.fn().mockRejectedValue(capacityError);
+
+    const result = await logLibraryUsage(
+      {
+        session_id: SESSION_IDS.one,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [],
+      },
+      { auditRejection }
+    );
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "no_libraries",
+    });
+  });
+
+  it("supports fail-closed mode for audit sink capacity errors", async () => {
+    const capacityError = Object.assign(new Error("disk full"), {
+      code: "ENOSPC",
+    });
+    const auditRejection = vi.fn().mockRejectedValue(capacityError);
+
+    const result = await logLibraryUsage(
+      {
+        session_id: SESSION_IDS.one,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [],
+      },
+      {
+        auditRejection,
+        auditSinkFailureMode: "fail_closed",
+      }
+    );
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "guardrail_failure",
+    });
+  });
+
   it("fails closed when rejection audit sink throws", async () => {
     const auditRejection = vi.fn().mockRejectedValue(new Error("audit backend unavailable"));
 

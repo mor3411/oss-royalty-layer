@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
 
@@ -17,9 +17,19 @@ export const DEFAULT_MAX_LIBRARIES_PER_WINDOW = 10_000;
 export const IN_MEMORY_CLEANUP_INTERVAL_MS = 1_000;
 export const DEFAULT_REJECTION_AUDIT_TTL_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_REJECTION_AUDIT_LOG_PATH = ".data/library-usage-rejection-audits.ndjson";
+export const DEFAULT_REJECTION_AUDIT_MAX_BYTES = 10 * 1024 * 1024;
+export const DEFAULT_REJECTION_AUDIT_MAX_FILES = 5;
+export const DEFAULT_INVALID_REJECTION_AUDIT_WINDOW_MS = 60 * 1000;
+export const DEFAULT_MAX_INVALID_REJECTION_AUDITS_PER_WINDOW = 200;
 
 const SESSION_ID_REGEX = /^[a-f0-9]{32,128}$/;
 const RuntimeEnvironmentSchema = z.enum(["development", "test", "production"]);
+const AuditSinkFailureModeSchema = z.enum(["fail_open", "fail_closed"]);
+const THROTTLED_REJECTION_REASONS = new Set<string>([
+  "invalid_payload",
+  "too_many_libraries",
+  "no_libraries",
+]);
 
 export const LibraryUsagePayloadSchema = z.object({
   name: z
@@ -113,6 +123,11 @@ export type LogLibraryUsageOptions = {
   rateLimiter?: SessionRateLimiter;
   auditRejection?: AuditLibraryUsageRejection;
   rejectionAuditFilePath?: string;
+  rejectionAuditMaxBytes?: number;
+  rejectionAuditMaxFiles?: number;
+  auditSinkFailureMode?: "fail_open" | "fail_closed";
+  invalidRejectionAuditWindowMs?: number;
+  maxInvalidRejectionAuditsPerWindow?: number;
   allowInMemoryGuardsInProduction?: boolean;
   runtimeEnvironment?: "development" | "test" | "production";
 };
@@ -122,6 +137,7 @@ const inMemoryLibraryUsageRejectionAudits: LibraryUsageRejectionAudit[] = [];
 const replayCache = new Map<string, number>();
 let lastReplayCacheCleanupMs = Number.NEGATIVE_INFINITY;
 let lastRejectionAuditCleanupMs = Number.NEGATIVE_INFINITY;
+const throttledRejectionAuditCounters = new Map<string, { windowStartMs: number; count: number }>();
 const sessionRateLimitState = new Map<
   string,
   {
@@ -163,6 +179,7 @@ export function clearLibraryUsageEvents(): void {
   replayCache.clear();
   lastReplayCacheCleanupMs = Number.NEGATIVE_INFINITY;
   lastRejectionAuditCleanupMs = Number.NEGATIVE_INFINITY;
+  throttledRejectionAuditCounters.clear();
   sessionRateLimitState.clear();
   lastRateLimitCleanupMs = Number.NEGATIVE_INFINITY;
 }
@@ -208,9 +225,98 @@ function cleanupRejectionAuditStore(nowMs: number, ttlMs: number): void {
   );
 }
 
-function createNdjsonAuditSink(filePath: string): AuditLibraryUsageRejection {
+function isErrnoCode(error: unknown, code: string): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === code;
+}
+
+function isAuditSinkCapacityError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOSPC" || code === "EDQUOT" || code === "EFBIG";
+}
+
+async function rotateAuditFileIfNeeded(
+  filePath: string,
+  maxBytes: number,
+  maxFiles: number
+): Promise<void> {
+  let currentFileSize = 0;
+  try {
+    const fileStats = await stat(filePath);
+    currentFileSize = fileStats.size;
+  } catch (error) {
+    if (isErrnoCode(error, "ENOENT")) {
+      return;
+    }
+    throw error;
+  }
+
+  if (currentFileSize < maxBytes) {
+    return;
+  }
+
+  if (maxFiles <= 1) {
+    await unlink(filePath).catch((error) => {
+      if (!isErrnoCode(error, "ENOENT")) {
+        throw error;
+      }
+    });
+    return;
+  }
+
+  const oldestBackupPath = `${filePath}.${maxFiles - 1}`;
+  await unlink(oldestBackupPath).catch((error) => {
+    if (!isErrnoCode(error, "ENOENT")) {
+      throw error;
+    }
+  });
+
+  for (let index = maxFiles - 2; index >= 1; index -= 1) {
+    const sourcePath = `${filePath}.${index}`;
+    const destinationPath = `${filePath}.${index + 1}`;
+    await rename(sourcePath, destinationPath).catch((error) => {
+      if (!isErrnoCode(error, "ENOENT")) {
+        throw error;
+      }
+    });
+  }
+
+  await rename(filePath, `${filePath}.1`);
+}
+
+function shouldAuditRejectedEvent(
+  reason: LogLibraryUsageRejectionReason,
+  nowMs: number,
+  windowMs: number,
+  maxEventsPerWindow: number
+): boolean {
+  if (!THROTTLED_REJECTION_REASONS.has(reason)) {
+    return true;
+  }
+
+  const existingCounter = throttledRejectionAuditCounters.get(reason);
+  if (!existingCounter || nowMs - existingCounter.windowStartMs >= windowMs) {
+    throttledRejectionAuditCounters.set(reason, { windowStartMs: nowMs, count: 1 });
+    return true;
+  }
+
+  if (existingCounter.count >= maxEventsPerWindow) {
+    return false;
+  }
+
+  existingCounter.count += 1;
+  return true;
+}
+
+function createNdjsonAuditSink(
+  filePath: string,
+  options: {
+    maxBytes: number;
+    maxFiles: number;
+  }
+): AuditLibraryUsageRejection {
   return async (event: LibraryUsageRejectionAudit) => {
     await mkdir(dirname(filePath), { recursive: true });
+    await rotateAuditFileIfNeeded(filePath, options.maxBytes, options.maxFiles);
     await appendFile(filePath, `${JSON.stringify(event)}\n`, "utf8");
   };
 }
@@ -472,13 +578,23 @@ export async function logLibraryUsage(
   const rateLimitWindowMs = options.rateLimitWindowMs ?? DEFAULT_RATE_LIMIT_WINDOW_MS;
   const maxRequestsPerWindow = options.maxRequestsPerWindow ?? DEFAULT_MAX_REQUESTS_PER_WINDOW;
   const maxLibrariesPerWindow = options.maxLibrariesPerWindow ?? DEFAULT_MAX_LIBRARIES_PER_WINDOW;
+  const rejectionAuditMaxBytes = options.rejectionAuditMaxBytes ?? DEFAULT_REJECTION_AUDIT_MAX_BYTES;
+  const rejectionAuditMaxFiles = options.rejectionAuditMaxFiles ?? DEFAULT_REJECTION_AUDIT_MAX_FILES;
+  const invalidRejectionAuditWindowMs =
+    options.invalidRejectionAuditWindowMs ?? DEFAULT_INVALID_REJECTION_AUDIT_WINDOW_MS;
+  const maxInvalidRejectionAuditsPerWindow =
+    options.maxInvalidRejectionAuditsPerWindow ?? DEFAULT_MAX_INVALID_REJECTION_AUDITS_PER_WINDOW;
+  const auditSinkFailureMode = options.auditSinkFailureMode ?? "fail_open";
   const runtimeEnvironment = resolveRuntimeEnvironment(options.runtimeEnvironment);
   const replayProtection = options.replayProtection ?? inMemoryReplayProtection;
   const rateLimiter = options.rateLimiter ?? inMemorySessionRateLimiter;
   const defaultAuditRejection =
     runtimeEnvironment === "test"
       ? defaultAuditLibraryUsageRejection
-      : createNdjsonAuditSink(options.rejectionAuditFilePath ?? DEFAULT_REJECTION_AUDIT_LOG_PATH);
+      : createNdjsonAuditSink(options.rejectionAuditFilePath ?? DEFAULT_REJECTION_AUDIT_LOG_PATH, {
+          maxBytes: rejectionAuditMaxBytes,
+          maxFiles: rejectionAuditMaxFiles,
+        });
   const auditRejection = options.auditRejection ?? defaultAuditRejection;
   const usesInMemoryGuardrails =
     replayProtection === inMemoryReplayProtection ||
@@ -511,6 +627,15 @@ export async function logLibraryUsage(
       reason,
       ...(context.recordedCount === undefined ? {} : { recorded_count: context.recordedCount }),
     };
+    const shouldAudit = shouldAuditRejectedEvent(
+      reason,
+      nowMs,
+      invalidRejectionAuditWindowMs,
+      maxInvalidRejectionAuditsPerWindow
+    );
+    if (!shouldAudit) {
+      return rejectedOutput;
+    }
 
     const auditEvent: LibraryUsageRejectionAudit = {
       observed_at: new Date(nowMs).toISOString(),
@@ -548,7 +673,13 @@ export async function logLibraryUsage(
 
     try {
       await auditRejection(auditEvent);
-    } catch {
+    } catch (error) {
+      if (
+        auditSinkFailureMode === "fail_open" &&
+        isAuditSinkCapacityError(error)
+      ) {
+        return rejectedOutput;
+      }
       return {
         status: "rejected",
         reason: "guardrail_failure",
@@ -563,7 +694,12 @@ export async function logLibraryUsage(
     !isPositiveInteger(replayWindowMs) ||
     !isPositiveInteger(rateLimitWindowMs) ||
     !isPositiveInteger(maxRequestsPerWindow) ||
-    !isPositiveInteger(maxLibrariesPerWindow)
+    !isPositiveInteger(maxLibrariesPerWindow) ||
+    !isPositiveInteger(rejectionAuditMaxBytes) ||
+    !isPositiveInteger(rejectionAuditMaxFiles) ||
+    !isPositiveInteger(invalidRejectionAuditWindowMs) ||
+    !isPositiveInteger(maxInvalidRejectionAuditsPerWindow) ||
+    !AuditSinkFailureModeSchema.safeParse(auditSinkFailureMode).success
   ) {
     return reject("guardrail_failure");
   }
