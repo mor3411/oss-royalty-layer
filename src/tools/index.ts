@@ -13,7 +13,6 @@ export {
   MAX_LIBRARIES_PER_CALL,
   MAX_RATE_LIMIT_ENTRIES,
   MAX_REPLAY_CACHE_ENTRIES,
-  getLibraryUsageRejectionAudits,
   logLibraryUsage,
 } from "./log-library-usage.js";
 export type {

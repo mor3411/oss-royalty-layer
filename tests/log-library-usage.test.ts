@@ -566,6 +566,59 @@ describe("logLibraryUsage", () => {
     }
   });
 
+  it("rejects in production when in-memory rejection audit is used without explicit opt-in", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    const replayProtection = {
+      cleanup: vi.fn(),
+      reserve: vi.fn(() => true),
+      release: vi.fn(),
+    };
+    const rateLimiter = {
+      cleanup: vi.fn(),
+      consume: vi.fn(() => true),
+      refund: vi.fn(),
+    };
+
+    try {
+      const input = {
+        session_id: SESSION_IDS.one,
+        source: "api",
+        ts: "2026-02-17T12:00:00.000Z",
+        libraries: [
+          {
+            name: "zod",
+            ecosystem: "npm",
+            version: "3.23.8",
+            calls: 1,
+          },
+        ],
+      };
+
+      const rejected = await logLibraryUsage(input, {
+        replayProtection,
+        rateLimiter,
+      });
+      const allowed = await logLibraryUsage(input, {
+        replayProtection,
+        rateLimiter,
+        allowInMemoryGuardsInProduction: true,
+      });
+
+      expect(rejected).toEqual({
+        status: "rejected",
+        reason: "guardrails_not_configured",
+      });
+      expect(allowed).toEqual({
+        status: "ok",
+        recorded_count: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.stubEnv("NODE_ENV", "test");
+    }
+  });
+
   it("fails closed when runtime mode is unknown or unset", async () => {
     vi.stubEnv("NODE_ENV", undefined);
 

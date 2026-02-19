@@ -12,6 +12,7 @@ export const DEFAULT_REPLAY_WINDOW_MS = 5 * 60 * 1000;
 export const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 export const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 export const DEFAULT_MAX_LIBRARIES_PER_WINDOW = 10_000;
+export const IN_MEMORY_CLEANUP_INTERVAL_MS = 1_000;
 
 const SESSION_ID_REGEX = /^[a-f0-9]{32,128}$/;
 const RuntimeEnvironmentSchema = z.enum(["development", "test", "production"]);
@@ -114,6 +115,7 @@ export type LogLibraryUsageOptions = {
 const inMemoryLibraryUsageEvents: LibraryUsageLoggedEvent[] = [];
 const inMemoryLibraryUsageRejectionAudits: LibraryUsageRejectionAudit[] = [];
 const replayCache = new Map<string, number>();
+let lastReplayCacheCleanupMs = Number.NEGATIVE_INFINITY;
 const sessionRateLimitState = new Map<
   string,
   {
@@ -122,6 +124,7 @@ const sessionRateLimitState = new Map<
     libraries: number;
   }
 >();
+let lastRateLimitCleanupMs = Number.NEGATIVE_INFINITY;
 
 type ReplayProtection = {
   cleanup: (nowMs: number, replayWindowMs: number) => Promise<void> | void;
@@ -152,7 +155,9 @@ export function clearLibraryUsageEvents(): void {
   inMemoryLibraryUsageEvents.length = 0;
   inMemoryLibraryUsageRejectionAudits.length = 0;
   replayCache.clear();
+  lastReplayCacheCleanupMs = Number.NEGATIVE_INFINITY;
   sessionRateLimitState.clear();
+  lastRateLimitCleanupMs = Number.NEGATIVE_INFINITY;
 }
 
 export function getLibraryUsageEvents(): LibraryUsageLoggedEvent[] {
@@ -199,6 +204,11 @@ function getRejectionReason(
 }
 
 function cleanupReplayCache(nowMs: number, replayWindowMs: number): void {
+  if (nowMs - lastReplayCacheCleanupMs < IN_MEMORY_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+  lastReplayCacheCleanupMs = nowMs;
+
   for (const [fingerprint, seenAtMs] of replayCache) {
     if (nowMs - seenAtMs > replayWindowMs) {
       replayCache.delete(fingerprint);
@@ -215,6 +225,11 @@ function cleanupReplayCache(nowMs: number, replayWindowMs: number): void {
 }
 
 function cleanupRateLimitState(nowMs: number, windowMs: number): void {
+  if (nowMs - lastRateLimitCleanupMs < IN_MEMORY_CLEANUP_INTERVAL_MS) {
+    return;
+  }
+  lastRateLimitCleanupMs = nowMs;
+
   for (const [sessionId, state] of sessionRateLimitState) {
     if (nowMs - state.windowStartMs > windowMs * 2) {
       sessionRateLimitState.delete(sessionId);
@@ -429,7 +444,9 @@ export async function logLibraryUsage(
   const rateLimiter = options.rateLimiter ?? inMemorySessionRateLimiter;
   const auditRejection = options.auditRejection ?? defaultAuditLibraryUsageRejection;
   const usesInMemoryGuardrails =
-    replayProtection === inMemoryReplayProtection || rateLimiter === inMemorySessionRateLimiter;
+    replayProtection === inMemoryReplayProtection ||
+    rateLimiter === inMemorySessionRateLimiter ||
+    auditRejection === defaultAuditLibraryUsageRejection;
 
   const rawAuditContext =
     typeof input === "object" && input !== null ? (input as Record<string, unknown>) : null;
