@@ -1,4 +1,20 @@
 export {
+  AllocationConstraintCandidateSchema,
+  AllocationConstraintViolationSchema,
+  MAX_ALLOCATION_CANDIDATES,
+  ValidateAllocationConstraintsInputSchema,
+  ValidateAllocationConstraintsResultSchema,
+  assertAllocationConstraints,
+  validateAllocationConstraints,
+} from "./allocation-constraints.js";
+export type {
+  AllocationConstraintCandidate,
+  AllocationConstraintViolation,
+  ValidateAllocationConstraintsInput,
+  ValidateAllocationConstraintsResult,
+} from "./allocation-constraints.js";
+
+export {
   DEFAULT_REJECTION_AUDIT_LOG_PATH,
   DEFAULT_REJECTION_AUDIT_TTL_MS,
   DEFAULT_MAX_LIBRARIES_PER_WINDOW,
