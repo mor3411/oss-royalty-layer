@@ -125,3 +125,60 @@ export type {
   AggregateUsageForPeriodOutput,
   AggregatedLibraryUsage,
 } from "./aggregate-usage-for-period.js";
+
+export {
+  AllocationProposalSchema,
+  AppliedAllocationPolicySchema,
+  ComputeAllocationsInputSchema,
+  ComputeAllocationsOutputSchema,
+  ComputeAllocationsPolicySchema,
+  UsageStatSchema,
+  computeAllocations,
+} from "./compute-allocations.js";
+export type {
+  AllocationProposal,
+  AppliedAllocationPolicy,
+  ComputeAllocationsInput,
+  ComputeAllocationsOutput,
+  ComputeAllocationsPolicy,
+  UsageStat,
+} from "./compute-allocations.js";
+
+export {
+  AllocationPersistenceAuditSchema,
+  getInMemoryPersistedAllocationByPeriod,
+  MAX_IN_MEMORY_ALLOCATION_PERSISTENCE_AUDITS,
+  MAX_IN_MEMORY_PERSISTED_ALLOCATION_RECORDS,
+  PersistAllocationsInputSchema,
+  PersistAllocationsOutputSchema,
+  PersistedAllocationRecordSchema,
+  clearInMemoryPersistedAllocations,
+  getInMemoryAllocationPersistenceAudits,
+  getInMemoryPersistedAllocations,
+  persistAllocations,
+} from "./persist-allocations.js";
+export type {
+  AllocationPersistenceAudit,
+  AllocationPersistenceStore,
+  PersistAllocationsInput,
+  PersistAllocationsOutput,
+  PersistedAllocationRecord,
+} from "./persist-allocations.js";
+
+export {
+  CreatePayoutBatchInputSchema,
+  CreatePayoutBatchOutputSchema,
+  PayoutBatchEntrySchema,
+  PayoutBatchFlagSchema,
+  clearInMemoryMaintainerProfiles,
+  createPayoutBatch,
+  getInMemoryMaintainerProfiles,
+  upsertInMemoryMaintainerProfile,
+} from "./create-payout-batch.js";
+export type {
+  CreatePayoutBatchInput,
+  CreatePayoutBatchOutput,
+  MaintainerPayoutProfile,
+  PayoutBatchEntry,
+  PayoutBatchFlag,
+} from "./create-payout-batch.js";

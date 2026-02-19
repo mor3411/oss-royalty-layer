@@ -63,4 +63,35 @@ describe("tool guardrails", () => {
       })
     ).toThrowError("valid allocation constraint output cannot include violations");
   });
+
+  it("rejects invalid persist allocation output payloads", () => {
+    expect(() =>
+      assertToolOutputSanity("persist_allocations", {
+        status: "already_exists",
+        period: "2026-02",
+        record_id: "alr_1",
+        persisted_at: "2026-02-19T23:30:00.000Z",
+        saved_count: 4,
+        duplicate_conflict: false,
+        audit_event_id: "ala_1",
+      })
+    ).toThrowError();
+  });
+
+  it("rejects inconsistent create payout batch totals", () => {
+    expect(() =>
+      assertToolOutputSanity("create_payout_batch", {
+        period: "2026-02",
+        currency: "USD",
+        payouts: [],
+        flagged: [],
+        totals: {
+          total_amount_minor: 100,
+          eligible_amount_minor: 40,
+          flagged_amount_minor: 30,
+        },
+        notes: "invalid totals",
+      })
+    ).toThrowError("totals are inconsistent");
+  });
 });

@@ -79,6 +79,64 @@ const ValidateAllocationConstraintsOutputSanitySchema = z.object({
   ),
 });
 
+const PersistAllocationsOutputSanitySchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+    record_id: z.string().min(1),
+    persisted_at: z.string().datetime(),
+    saved_count: z.number().int().positive(),
+    audit_event_id: z.string().min(1),
+  }),
+  z.object({
+    status: z.literal("already_exists"),
+    period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+    record_id: z.string().min(1),
+    persisted_at: z.string().datetime(),
+    saved_count: z.literal(0),
+    duplicate_conflict: z.boolean(),
+    audit_event_id: z.string().min(1),
+  }),
+]);
+
+const CreatePayoutBatchOutputSanitySchema = z.object({
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  payouts: z.array(
+    z.object({
+      maintainer_id: z.string().min(1),
+      amount_minor: z.number().int().positive(),
+      currency: z.string().regex(/^[A-Z]{3}$/),
+      payout_account: z.object({
+        provider: z.enum(["stripe", "adyen", "other"]),
+        account_id: z.string().min(1),
+      }),
+      allocation_count: z.number().int().positive(),
+    })
+  ),
+  flagged: z.array(
+    z.object({
+      maintainer_id: z.string().min(1),
+      amount_minor: z.number().int().positive(),
+      allocation_count: z.number().int().positive(),
+      reason: z.enum([
+        "maintainer_not_found",
+        "maintainer_not_verified",
+        "payout_account_missing",
+      ]),
+      verification_status: z
+        .enum(["unverified", "pending", "verified", "rejected"])
+        .optional(),
+    })
+  ),
+  totals: z.object({
+    total_amount_minor: z.number().int().nonnegative(),
+    eligible_amount_minor: z.number().int().nonnegative(),
+    flagged_amount_minor: z.number().int().nonnegative(),
+  }),
+  notes: z.string().min(1),
+});
+
 function estimatePayloadBytes(payload: unknown): number {
   const serialized = JSON.stringify(payload);
   return Buffer.byteLength(serialized, "utf8");
@@ -168,6 +226,23 @@ export function assertToolOutputSanity(
     }
     if (parsedOutput.status === "invalid" && parsedOutput.violations.length === 0) {
       throw new Error("invalid allocation constraint output must include at least one violation");
+    }
+    return;
+  }
+
+  if (toolName === "persist_allocations") {
+    PersistAllocationsOutputSanitySchema.parse(output);
+    return;
+  }
+
+  if (toolName === "create_payout_batch") {
+    const parsedOutput = CreatePayoutBatchOutputSanitySchema.parse(output);
+    if (
+      parsedOutput.totals.eligible_amount_minor +
+        parsedOutput.totals.flagged_amount_minor !==
+      parsedOutput.totals.total_amount_minor
+    ) {
+      throw new Error("create_payout_batch totals are inconsistent");
     }
   }
 }
