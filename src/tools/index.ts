@@ -3,6 +3,7 @@ export {
   DEFAULT_MAX_REQUESTS_PER_WINDOW,
   DEFAULT_RATE_LIMIT_WINDOW_MS,
   DEFAULT_REPLAY_WINDOW_MS,
+  IN_MEMORY_CLEANUP_INTERVAL_MS,
   LibraryUsageRejectionAuditSchema,
   LibraryUsageLoggedEventSchema,
   LibraryUsagePayloadSchema,
@@ -26,3 +27,47 @@ export type {
   LibraryUsageRejectionAudit,
   LogLibraryUsageRejectionReason,
 } from "./log-library-usage.js";
+
+export {
+  MAX_CANONICAL_LIBRARY_NAME_LENGTH,
+  CanonicalLibraryReferenceSchema,
+  LibraryRegistryEntrySchema,
+  canonicalizeLibraryReference,
+  createInMemoryLibraryRegistry,
+  getCanonicalLibraryKey,
+  toCanonicalLibraryId,
+} from "./library-registry.js";
+export type {
+  CanonicalLibraryReference,
+  InMemoryLibraryRegistry,
+  LibraryIdResolver,
+  LibraryRegistryEntry,
+} from "./library-registry.js";
+
+export {
+  MAX_IN_MEMORY_INGESTED_EVENTS,
+  LibraryUsageLoggedEnvelopeSchema,
+  LibraryUsageIngestionMetricsSchema,
+  clearInMemoryLibraryUsageIngestionEvents,
+  createLibraryUsageIngestionPipeline,
+  createNdjsonLibraryUsageEventStore,
+  getInMemoryLibraryUsageIngestionEvents,
+} from "./library-usage-ingestion.js";
+export type {
+  LibraryUsageEventStore,
+  LibraryUsageIngestionMetrics,
+  LibraryUsageIngestionPipeline,
+  LibraryUsageLoggedEnvelope,
+} from "./library-usage-ingestion.js";
+
+export {
+  AggregateUsageForPeriodInputSchema,
+  AggregateUsageForPeriodOutputSchema,
+  AggregatedLibraryUsageSchema,
+  aggregateUsageForPeriod,
+} from "./aggregate-usage-for-period.js";
+export type {
+  AggregateUsageForPeriodInput,
+  AggregateUsageForPeriodOutput,
+  AggregatedLibraryUsage,
+} from "./aggregate-usage-for-period.js";
