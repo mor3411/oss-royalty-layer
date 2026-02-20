@@ -81,7 +81,10 @@ export type VerifyRoyaltyCycleAuditTrailOutput = z.infer<
 export type RoyaltyCycleAuditStore = {
   readLatestByPeriod:
     (period: string) => Promise<RoyaltyCycleAuditRecord | null> | RoyaltyCycleAuditRecord | null;
-  appendRecord: (record: RoyaltyCycleAuditRecord) => Promise<void> | void;
+  appendRecord:
+    (record: RoyaltyCycleAuditRecord, expectedPreviousEventHash?: string | null) =>
+      | Promise<void>
+      | void;
   readByPeriod:
     (period: string) => Promise<RoyaltyCycleAuditRecord[]> | RoyaltyCycleAuditRecord[];
   clear?: () => Promise<void> | void;
@@ -99,6 +102,9 @@ type AppendRoyaltyCycleAuditEventOptions = {
 };
 
 const inMemoryAuditRecordsByPeriod = new Map<string, RoyaltyCycleAuditRecord[]>();
+export const MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_EVENTS_PER_PERIOD = 1_000;
+export const MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_PERIODS = 24;
+const AUDIT_PREVIOUS_HASH_MISMATCH_CODE = "audit_previous_hash_mismatch";
 
 function cloneAuditRecord(record: RoyaltyCycleAuditRecord): RoyaltyCycleAuditRecord {
   return {
@@ -117,8 +123,41 @@ const inMemoryRoyaltyCycleAuditStore: RoyaltyCycleAuditStore = {
     return latest ? cloneAuditRecord(latest) : null;
   },
 
-  appendRecord(record: RoyaltyCycleAuditRecord): void {
+  appendRecord(
+    record: RoyaltyCycleAuditRecord,
+    expectedPreviousEventHash?: string | null
+  ): void {
+    const latest = inMemoryAuditRecordsByPeriod.get(record.period)?.at(-1) ?? null;
+    const latestHash = latest?.event_hash ?? null;
+    if (
+      expectedPreviousEventHash !== undefined &&
+      latestHash !== expectedPreviousEventHash
+    ) {
+      const error = new Error(
+        `previous event hash mismatch for period ${record.period}: expected ${expectedPreviousEventHash ?? "null"}, got ${latestHash ?? "null"}`
+      ) as Error & { code?: string };
+      error.code = AUDIT_PREVIOUS_HASH_MISMATCH_CODE;
+      throw error;
+    }
+
+    if (!inMemoryAuditRecordsByPeriod.has(record.period)) {
+      while (
+        inMemoryAuditRecordsByPeriod.size >= MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_PERIODS
+      ) {
+        const oldestPeriod = [...inMemoryAuditRecordsByPeriod.keys()].sort(
+          (left, right) => left.localeCompare(right)
+        )[0];
+        if (!oldestPeriod) {
+          break;
+        }
+        inMemoryAuditRecordsByPeriod.delete(oldestPeriod);
+      }
+    }
+
     const current = inMemoryAuditRecordsByPeriod.get(record.period) ?? [];
+    while (current.length >= MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_EVENTS_PER_PERIOD) {
+      current.shift();
+    }
     current.push(cloneAuditRecord(record));
     inMemoryAuditRecordsByPeriod.set(record.period, current);
   },
@@ -227,8 +266,12 @@ export function verifyRoyaltyCycleAuditTrail(period: string): VerifyRoyaltyCycle
   const events = getInMemoryRoyaltyCycleAuditsByPeriod(period);
   let previousHash: string | null = null;
 
-  for (const event of events) {
-    if (event.previous_event_hash !== previousHash) {
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (!event) {
+      continue;
+    }
+    if (index > 0 && event.previous_event_hash !== previousHash) {
       return {
         status: "invalid",
         period,
@@ -301,44 +344,70 @@ export async function appendRoyaltyCycleAuditEvent(
   const store = options.store ?? inMemoryRoyaltyCycleAuditStore;
   const nowMs = options.now?.() ?? Date.now();
   const observedAt = new Date(nowMs).toISOString();
-  const latest = await store.readLatestByPeriod(parsedInput.period);
-  const previousEventHash = latest?.event_hash ?? null;
-
   const payloadHash = computePayloadHash(parsedInput.payload);
   const eventIdGenerator = options.eventIdGenerator ?? defaultEventIdGenerator;
-  const eventId = eventIdGenerator(parsedInput.period, parsedInput.run_id, nowMs);
-  const eventHash = computeEventHash({
-    eventId,
-    period: parsedInput.period,
-    runId: parsedInput.run_id,
-    eventType: parsedInput.event_type,
-    payloadHash,
-    previousEventHash,
-    observedAt,
-  });
+  const maxAttempts = 3;
 
-  const record: RoyaltyCycleAuditRecord = {
-    event_id: eventId,
-    period: parsedInput.period,
-    run_id: parsedInput.run_id,
-    event_type: parsedInput.event_type,
-    payload: parsedInput.payload,
-    payload_hash: payloadHash,
-    previous_event_hash: previousEventHash,
-    event_hash: eventHash,
-    observed_at: observedAt,
-  };
-  await store.appendRecord(record);
+  let output: AppendRoyaltyCycleAuditEventOutput | null = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const latest = await store.readLatestByPeriod(parsedInput.period);
+    const previousEventHash = latest?.event_hash ?? null;
+    const eventId = eventIdGenerator(parsedInput.period, parsedInput.run_id, nowMs);
+    const eventHash = computeEventHash({
+      eventId,
+      period: parsedInput.period,
+      runId: parsedInput.run_id,
+      eventType: parsedInput.event_type,
+      payloadHash,
+      previousEventHash,
+      observedAt,
+    });
 
-  const output: AppendRoyaltyCycleAuditEventOutput = {
-    status: "recorded",
-    event_id: eventId,
-    period: parsedInput.period,
-    run_id: parsedInput.run_id,
-    event_hash: eventHash,
-    previous_event_hash: previousEventHash,
-    observed_at: observedAt,
-  };
+    const record: RoyaltyCycleAuditRecord = {
+      event_id: eventId,
+      period: parsedInput.period,
+      run_id: parsedInput.run_id,
+      event_type: parsedInput.event_type,
+      payload: parsedInput.payload,
+      payload_hash: payloadHash,
+      previous_event_hash: previousEventHash,
+      event_hash: eventHash,
+      observed_at: observedAt,
+    };
+
+    try {
+      await store.appendRecord(record, previousEventHash);
+      output = {
+        status: "recorded",
+        event_id: eventId,
+        period: parsedInput.period,
+        run_id: parsedInput.run_id,
+        event_hash: eventHash,
+        previous_event_hash: previousEventHash,
+        observed_at: observedAt,
+      };
+      break;
+    } catch (error) {
+      const code =
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      const isRetryableMismatch =
+        code === AUDIT_PREVIOUS_HASH_MISMATCH_CODE ||
+        message.includes("previous event hash mismatch");
+      if (!isRetryableMismatch || attempt >= maxAttempts - 1) {
+        throw error;
+      }
+    }
+  }
+
+  if (!output) {
+    throw new Error("failed to append royalty cycle audit event after retry attempts");
+  }
   assertToolOutputSanity("append_royalty_cycle_audit", output);
   return output;
 }

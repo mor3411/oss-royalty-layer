@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_IN_MEMORY_ROYALTY_OBSERVABILITY_SAMPLES,
   clearInMemoryRoyaltyObservabilitySamples,
+  getInMemoryRoyaltyObservabilitySamples,
   getRoyaltyObservabilityDashboard,
   recordRoyaltyObservabilitySample,
 } from "../src/tools/royalty-observability.js";
@@ -127,5 +129,39 @@ describe("royalty observability", () => {
         }
       )
     ).rejects.toThrowError("authorization required");
+  });
+
+  it("caps in-memory observability sample retention", async () => {
+    clearInMemoryRoyaltyObservabilitySamples();
+
+    for (
+      let index = 0;
+      index < MAX_IN_MEMORY_ROYALTY_OBSERVABILITY_SAMPLES + 5;
+      index += 1
+    ) {
+      await recordRoyaltyObservabilitySample({
+        period: "2026-02",
+        run_id: `rrn_${index}`,
+        aggregation: {
+          pages_fetched: 1,
+          library_count: 1,
+          aggregation_lag_ms: index,
+        },
+        anomaly: {
+          detected: false,
+          codes: [],
+        },
+        payout: {
+          outcome: "skipped",
+          candidate_payout_count: 0,
+          executed_count: 0,
+          skip_reason: "approval_required",
+        },
+      });
+    }
+
+    const samples = getInMemoryRoyaltyObservabilitySamples("2026-02");
+    expect(samples).toHaveLength(MAX_IN_MEMORY_ROYALTY_OBSERVABILITY_SAMPLES);
+    expect(samples[0]?.run_id).toBe("rrn_5");
   });
 });

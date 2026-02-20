@@ -277,9 +277,15 @@ export async function runRoyaltyCycle(
     .digest("hex")
     .slice(0, 24)}`;
   notes.push(`run_id=${runId}`);
-  const telemetryIngestionMetrics = options.getTelemetryIngestionMetrics
-    ? await options.getTelemetryIngestionMetrics()
-    : undefined;
+  let telemetryIngestionMetrics: LibraryUsageIngestionMetrics | undefined;
+  if (options.getTelemetryIngestionMetrics) {
+    try {
+      telemetryIngestionMetrics = await options.getTelemetryIngestionMetrics();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notes.push(`telemetry_metrics_error=${message}`);
+    }
+  }
   const periodEndMs = Date.parse(parsedInput.period_end);
   const aggregationLagMs = Number.isFinite(periodEndMs)
     ? Math.max(0, runEpochMs - periodEndMs)

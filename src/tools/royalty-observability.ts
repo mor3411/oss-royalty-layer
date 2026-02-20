@@ -177,6 +177,7 @@ type GetRoyaltyObservabilityDashboardOptions = {
 };
 
 const inMemorySamples: RoyaltyObservabilitySample[] = [];
+export const MAX_IN_MEMORY_ROYALTY_OBSERVABILITY_SAMPLES = 2_000;
 
 function cloneSample(sample: RoyaltyObservabilitySample): RoyaltyObservabilitySample {
   return {
@@ -190,6 +191,9 @@ function cloneSample(sample: RoyaltyObservabilitySample): RoyaltyObservabilitySa
 
 const inMemoryRoyaltyObservabilityStore: RoyaltyObservabilityStore = {
   appendSample(sample: RoyaltyObservabilitySample): void {
+    while (inMemorySamples.length >= MAX_IN_MEMORY_ROYALTY_OBSERVABILITY_SAMPLES) {
+      inMemorySamples.shift();
+    }
     inMemorySamples.push(cloneSample(sample));
   },
 
