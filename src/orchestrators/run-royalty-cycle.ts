@@ -26,6 +26,7 @@ import {
 } from "../tools/payout-anomaly-detector.js";
 import {
   appendRoyaltyCycleAuditEvent,
+  getInMemoryRoyaltyCycleAuditsByPeriod,
   type RoyaltyCycleAuditStore,
 } from "../tools/royalty-cycle-audit.js";
 import {
@@ -94,6 +95,7 @@ export type ExecutePayoutsInput = {
   period: string;
   currency: string;
   payouts: PayoutBatchEntry[];
+  idempotency_key: string;
 };
 
 export type ExecutePayoutsResult = {
@@ -640,6 +642,7 @@ export async function runRoyaltyCycle(
     totals: payoutBatch.totals,
   });
   notes.push(`approval_hash=${payoutBatchHash}`);
+  const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${payoutBatchHash}`;
 
   const anomalyResult = options.detectPayoutAnomalies
     ? await options.detectPayoutAnomalies({
@@ -1013,6 +1016,56 @@ export async function runRoyaltyCycle(
     };
   }
 
+  const existingExecutionRecorded = (
+    (
+      options.auditStore
+        ? await options.auditStore.readByPeriod(parsedInput.period)
+        : getInMemoryRoyaltyCycleAuditsByPeriod(parsedInput.period)
+    ) ?? []
+  ).some((event) => {
+    if (event.event_type !== "payout_execution_executed") {
+      return false;
+    }
+    return event.payload.payout_batch_hash === payoutBatchHash;
+  });
+  if (existingExecutionRecorded) {
+    await appendAuditEvent("payout_execution_skipped", {
+      reason: "already_executed",
+      candidate_payout_count: payoutExecutionCandidates.length,
+      payout_batch_hash: payoutBatchHash,
+      idempotency_key: payoutExecutionIdempotencyKey,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutExecutionCandidates.length,
+      executedCount: 0,
+      skipReason: "already_executed",
+    });
+    return {
+      status: "completed",
+      period: parsedInput.period,
+      pool_amount_minor: parsedInput.pool_amount_minor,
+      aggregation: {
+        pages_fetched: pagesFetched,
+        library_count: usageStats.length,
+        usage_stats: usageStats,
+      },
+      allocation,
+      persistence,
+      payout_batch: payoutBatch,
+      execution: {
+        status: "skipped",
+        reason: "already_executed",
+        executed_count: 0,
+      },
+      notes,
+    };
+  }
+
   assertToolAuthorized({
     toolName: "execute_payouts",
     ...(options.principal === undefined ? {} : { principal: options.principal }),
@@ -1032,10 +1085,13 @@ export async function runRoyaltyCycle(
     period: parsedInput.period,
     currency: payoutBatch.currency,
     payouts: payoutExecutionCandidates,
+    idempotency_key: payoutExecutionIdempotencyKey,
   });
   await appendAuditEvent("payout_execution_executed", {
     candidate_payout_count: payoutExecutionCandidates.length,
     executed_count: executionResult.executed_count ?? payoutExecutionCandidates.length,
+    payout_batch_hash: payoutBatchHash,
+    idempotency_key: payoutExecutionIdempotencyKey,
   });
   await appendObservability({
     pagesFetched,

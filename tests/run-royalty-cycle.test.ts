@@ -565,8 +565,33 @@ describe("runRoyaltyCycle", () => {
     }
     expect(secondRun.execution.status).toBe("executed");
     expect(executePayouts).toHaveBeenCalledTimes(1);
+    const executeInput = executePayouts.mock.calls[0]?.[0];
+    expect(executeInput?.idempotency_key).toBe(
+      `execute_payouts:2026-02:${approvalHash}`
+    );
     expect(secondRun.notes).toContain("approval_decision=approved");
     expect(secondRun.notes).toContain("approval_reviewer=fin.reviewer");
+
+    const thirdRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(thirdRun.status).toBe("completed");
+    if (thirdRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(thirdRun.execution).toEqual({
+      status: "skipped",
+      reason: "already_executed",
+      executed_count: 0,
+    });
+    expect(executePayouts).toHaveBeenCalledTimes(1);
+
+    const audits = getInMemoryRoyaltyCycleAuditsByPeriod("2026-02");
+    expect(
+      audits.some(
+        (event) =>
+          event.event_type === "payout_execution_skipped" &&
+          event.payload.reason === "already_executed"
+      )
+    ).toBe(true);
   });
 
   it("fails closed when allocation persistence reports a duplicate conflict", async () => {
