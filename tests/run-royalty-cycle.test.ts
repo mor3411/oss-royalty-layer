@@ -561,7 +561,6 @@ describe("runRoyaltyCycle", () => {
         period: "2026-02",
         payout_batch_hash: approvalHash,
         decision: "approved",
-        reviewer_id: "fin.reviewer",
         reason: "manual review passed",
       },
       {
@@ -887,7 +886,6 @@ describe("runRoyaltyCycle", () => {
         period: "2026-02",
         payout_batch_hash: approvalHash,
         decision: "approved",
-        reviewer_id: "fin.reviewer",
         reason: "manual review passed",
       },
       {
@@ -1003,7 +1001,6 @@ describe("runRoyaltyCycle", () => {
         period: "2026-02",
         payout_batch_hash: approvalHash,
         decision: "adjusted",
-        reviewer_id: "fin.adjuster",
         reason: "limit payout for manual holdback",
         adjustments: [
           {
@@ -1151,7 +1148,6 @@ describe("runRoyaltyCycle", () => {
         period: "2026-02",
         payout_batch_hash: approvalHash,
         decision: "adjusted",
-        reviewer_id: "fin.adjuster",
         reason: "reduce alpha payout",
         adjustments: [
           {

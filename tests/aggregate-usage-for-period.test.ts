@@ -203,6 +203,120 @@ describe("aggregateUsageForPeriod", () => {
     ).rejects.toThrowError("invalid cursor");
   });
 
+  it("memoizes resolver lookups for repeated library references", async () => {
+    clearInMemoryLibraryUsageIngestionEvents();
+
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "api",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 1,
+      },
+    });
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.two,
+      source: "api",
+      ts: "2026-02-19T10:01:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 2,
+      },
+    });
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.three,
+      source: "api",
+      ts: "2026-02-19T10:02:00.000Z",
+      library: {
+        name: "beta",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 3,
+      },
+    });
+
+    const resolveLibraryId = vi.fn(
+      (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id
+    );
+
+    await aggregateUsageForPeriod(
+      {
+        period_start: "2026-02-19T00:00:00.000Z",
+        period_end: "2026-02-20T00:00:00.000Z",
+      },
+      {
+        eventStore: {
+          readAll: pipeline.readIngestedEvents,
+          append: () => {
+            throw new Error("not used in aggregation");
+          },
+        },
+        resolveLibraryId,
+      }
+    );
+
+    expect(resolveLibraryId).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects aggregate snapshots that exceed the configured size limit", async () => {
+    clearInMemoryLibraryUsageIngestionEvents();
+
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "api",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 1,
+      },
+    });
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.two,
+      source: "api",
+      ts: "2026-02-19T10:01:00.000Z",
+      library: {
+        name: "beta",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 1,
+      },
+    });
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-02-19T00:00:00.000Z",
+          period_end: "2026-02-20T00:00:00.000Z",
+          page_size: 1,
+        },
+        {
+          eventStore: {
+            readAll: pipeline.readIngestedEvents,
+            append: () => {
+              throw new Error("not used in aggregation");
+            },
+          },
+          resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
+          maxSnapshotRows: 1,
+        }
+      )
+    ).rejects.toThrowError("exceeds snapshot limit");
+  });
+
   it("enforces guardrail risk allowance and maximum aggregation period", async () => {
     const eventStore = {
       readAll: () => [],

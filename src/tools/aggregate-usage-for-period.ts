@@ -5,6 +5,7 @@ import {
   type AuthorizationRuntimeEnvironment,
 } from "./authz.js";
 import {
+  MAX_GUARDRAIL_AGGREGATE_OUTPUT_ROWS,
   assertToolInputVetting,
   assertToolOutputSanity,
   assertToolRiskAllowed,
@@ -21,6 +22,7 @@ const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1000;
 const AGGREGATION_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const MAX_AGGREGATION_SNAPSHOTS = 256;
+export const MAX_AGGREGATION_SNAPSHOT_ROWS = MAX_GUARDRAIL_AGGREGATE_OUTPUT_ROWS;
 const SAFE_INTEGER_SCHEMA = z.number().int().safe();
 
 export const AggregateUsageForPeriodInputSchema = z
@@ -56,6 +58,7 @@ type AggregateUsageForPeriodOptions = {
   now?: () => number;
   maxAllowedRisk?: ToolRiskLevel;
   maxAggregationPeriodDays?: number;
+  maxSnapshotRows?: number;
   principal?: unknown;
   runtimeEnvironment?: AuthorizationRuntimeEnvironment;
   allowTestAuthBypass?: boolean;
@@ -152,6 +155,7 @@ async function buildAggregates(
   const periodStartMs = Date.parse(parsedInput.period_start);
   const periodEndMs = Date.parse(parsedInput.period_end);
   const byLibrary = new Map<string, { totalCalls: number; sessionIds: Set<string> }>();
+  const resolvedLibraryIdsByKey = new Map<string, Promise<string>>();
 
   for (const envelope of envelopes) {
     const eventTsMs = Date.parse(envelope.event.ts);
@@ -159,10 +163,18 @@ async function buildAggregates(
       continue;
     }
 
-    const libraryId = await resolveLibraryId({
-      ecosystem: envelope.event.library.ecosystem,
-      name: envelope.event.library.name,
-    });
+    const libraryKey = `${envelope.event.library.ecosystem}:${envelope.event.library.name}`;
+    let libraryIdPromise = resolvedLibraryIdsByKey.get(libraryKey);
+    if (!libraryIdPromise) {
+      libraryIdPromise = Promise.resolve(
+        resolveLibraryId({
+          ecosystem: envelope.event.library.ecosystem,
+          name: envelope.event.library.name,
+        })
+      );
+      resolvedLibraryIdsByKey.set(libraryKey, libraryIdPromise);
+    }
+    const libraryId = await libraryIdPromise;
 
     const existing = byLibrary.get(libraryId) ?? {
       totalCalls: 0,
@@ -215,6 +227,10 @@ export async function aggregateUsageForPeriod(
   const nowMs = options.now?.() ?? Date.now();
   cleanupAggregationSnapshots(nowMs);
   const queryHash = computeQueryHash(parsedInput.period_start, parsedInput.period_end);
+  const maxSnapshotRows = options.maxSnapshotRows ?? MAX_AGGREGATION_SNAPSHOT_ROWS;
+  if (!Number.isInteger(maxSnapshotRows) || maxSnapshotRows <= 0) {
+    throw new Error("maxSnapshotRows must be a positive integer");
+  }
 
   const resolveLibraryId =
     options.resolveLibraryId ??
@@ -244,6 +260,11 @@ export async function aggregateUsageForPeriod(
     offset = decodedCursor.offset;
   } else {
     aggregatesSource = await buildAggregates(parsedInput, options.eventStore, resolveLibraryId);
+    if (aggregatesSource.length > maxSnapshotRows) {
+      throw new Error(
+        `aggregate result set ${aggregatesSource.length} rows exceeds snapshot limit ${maxSnapshotRows}`
+      );
+    }
   }
 
   if (offset > aggregatesSource.length) {

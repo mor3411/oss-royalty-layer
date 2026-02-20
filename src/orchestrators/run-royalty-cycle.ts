@@ -406,6 +406,322 @@ function applyCallbackAdjustedPayouts(
   return applyApprovalAdjustments(payouts, adjustments);
 }
 
+type AppendAuditEventType =
+  | "cycle_no_usage"
+  | "allocation_proposal_persisted"
+  | "payout_approval_required"
+  | "payout_approval_resolved"
+  | "payout_anomaly_detected"
+  | "payout_execution_skipped"
+  | "payout_execution_executed";
+
+type AppendAuditEvent = (
+  eventType: AppendAuditEventType,
+  payload?: Record<string, unknown>
+) => Promise<void>;
+
+type AppendObservability = (input: {
+  pagesFetched: number;
+  libraryCount: number;
+  anomalyDetected: boolean;
+  anomalyCodes: string[];
+  payoutOutcome: "executed" | "skipped";
+  candidatePayoutCount: number;
+  executedCount: number;
+  skipReason?: string;
+}) => Promise<void>;
+
+type UsageCollectionResult = {
+  usageStats: AggregatedLibraryUsage[];
+  pagesFetched: number;
+};
+
+async function collectUsageAggregates(
+  parsedInput: RunRoyaltyCycleInput,
+  options: RunRoyaltyCycleOptions,
+  mediumRisk: ToolRiskLevel
+): Promise<UsageCollectionResult> {
+  const usageStats: AggregatedLibraryUsage[] = [];
+  let cursor: string | undefined;
+  let pagesFetched = 0;
+  const eventStore = options.eventStore ?? defaultEventStore;
+
+  do {
+    const page: AggregateUsageForPeriodOutput = await aggregateUsageForPeriod(
+      {
+        period_start: parsedInput.period_start,
+        period_end: parsedInput.period_end,
+        ...(cursor === undefined ? {} : { cursor }),
+        page_size: parsedInput.page_size,
+      },
+      {
+        eventStore,
+        ...(options.resolveLibraryId === undefined
+          ? {}
+          : { resolveLibraryId: options.resolveLibraryId }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+        maxAllowedRisk: mediumRisk,
+        ...(options.maxAggregationPeriodDays === undefined
+          ? {}
+          : { maxAggregationPeriodDays: options.maxAggregationPeriodDays }),
+        ...(options.principal === undefined ? {} : { principal: options.principal }),
+        ...(options.runtimeEnvironment === undefined
+          ? {}
+          : { runtimeEnvironment: options.runtimeEnvironment }),
+        ...(options.allowTestAuthBypass === undefined
+          ? {}
+          : { allowTestAuthBypass: options.allowTestAuthBypass }),
+      }
+    );
+    usageStats.push(...page.aggregates);
+    cursor = page.next_cursor;
+    pagesFetched += 1;
+  } while (cursor);
+
+  return { usageStats, pagesFetched };
+}
+
+type ApprovalResolution =
+  | { status: "continue"; payoutExecutionCandidates: PayoutBatchEntry[] }
+  | { status: "skip"; reason: string };
+
+async function resolvePayoutExecutionCandidates(params: {
+  period: string;
+  payoutBatchHash: string;
+  payoutBatch: CreatePayoutBatchOutput;
+  allocation: ComputeAllocationsOutput;
+  persistence: PersistAllocationsOutput;
+  options: RunRoyaltyCycleOptions;
+  notes: string[];
+  pagesFetched: number;
+  libraryCount: number;
+  appendAuditEvent: AppendAuditEvent;
+  appendObservability: AppendObservability;
+}): Promise<ApprovalResolution> {
+  const {
+    period,
+    payoutBatchHash,
+    payoutBatch,
+    allocation,
+    persistence,
+    options,
+    notes,
+    pagesFetched,
+    libraryCount,
+    appendAuditEvent,
+    appendObservability,
+  } = params;
+
+  const anomalyResult = options.detectPayoutAnomalies
+    ? await options.detectPayoutAnomalies({
+        payoutBatch,
+        allocation,
+      })
+    : detectPayoutAnomalies({
+        payoutBatch,
+        allocation,
+      });
+  const anomalyDetails = anomalyResult as DetectPayoutAnomaliesResult;
+  if (anomalyResult.has_anomaly) {
+    if (
+      Array.isArray(anomalyDetails.codes) &&
+      anomalyDetails.codes.length > 0
+    ) {
+      notes.push(`anomaly_codes=${anomalyDetails.codes.join(",")}`);
+    }
+    await appendAuditEvent("payout_anomaly_detected", {
+      reason: anomalyResult.reason ?? "payout_anomaly_detected",
+      codes:
+        Array.isArray(anomalyDetails.codes) && anomalyDetails.codes.length > 0
+          ? anomalyDetails.codes
+          : [],
+    });
+    await appendAuditEvent("payout_execution_skipped", {
+      reason: anomalyResult.reason ?? "payout_anomaly_detected",
+      candidate_payout_count: payoutBatch.payouts.length,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount,
+      anomalyDetected: true,
+      anomalyCodes:
+        Array.isArray(anomalyDetails.codes) && anomalyDetails.codes.length > 0
+          ? anomalyDetails.codes
+          : [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutBatch.payouts.length,
+      executedCount: 0,
+      skipReason: anomalyResult.reason ?? "payout_anomaly_detected",
+    });
+    return {
+      status: "skip",
+      reason: anomalyResult.reason ?? "payout_anomaly_detected",
+    };
+  }
+
+  let payoutExecutionCandidates = payoutBatch.payouts;
+  const approval = options.approvePayoutBatch
+    ? await options.approvePayoutBatch({
+        payoutBatch,
+        allocation,
+        persistence,
+      })
+    : null;
+
+  if (!approval) {
+    const storedApproval = options.resolvePayoutBatchApproval
+      ? await options.resolvePayoutBatchApproval({
+          period,
+          payoutBatchHash,
+          payoutBatch,
+          allocation,
+          persistence,
+        })
+      : getInMemoryPayoutBatchApproval(period, payoutBatchHash);
+
+    if (!storedApproval) {
+      await appendAuditEvent("payout_approval_required", {
+        payout_batch_hash: payoutBatchHash,
+      });
+      await appendAuditEvent("payout_execution_skipped", {
+        reason: "approval_required",
+        candidate_payout_count: payoutBatch.payouts.length,
+      });
+      await appendObservability({
+        pagesFetched,
+        libraryCount,
+        anomalyDetected: false,
+        anomalyCodes: [],
+        payoutOutcome: "skipped",
+        candidatePayoutCount: payoutBatch.payouts.length,
+        executedCount: 0,
+        skipReason: "approval_required",
+      });
+      return {
+        status: "skip",
+        reason: "approval_required",
+      };
+    }
+
+    notes.push(`approval_decision=${storedApproval.decision}`);
+    notes.push(`approval_reviewer=${storedApproval.reviewer_id}`);
+    await appendAuditEvent("payout_approval_resolved", {
+      source: "stored",
+      payout_batch_hash: payoutBatchHash,
+      decision: storedApproval.decision,
+      reviewer_id: storedApproval.reviewer_id,
+      reason: storedApproval.reason,
+      adjustments_count: storedApproval.adjustments.length,
+    });
+
+    if (storedApproval.decision === "denied") {
+      await appendAuditEvent("payout_execution_skipped", {
+        reason: storedApproval.reason || "payout_batch_denied",
+        candidate_payout_count: payoutBatch.payouts.length,
+      });
+      await appendObservability({
+        pagesFetched,
+        libraryCount,
+        anomalyDetected: false,
+        anomalyCodes: [],
+        payoutOutcome: "skipped",
+        candidatePayoutCount: payoutBatch.payouts.length,
+        executedCount: 0,
+        skipReason: storedApproval.reason || "payout_batch_denied",
+      });
+      return {
+        status: "skip",
+        reason: storedApproval.reason || "payout_batch_denied",
+      };
+    }
+
+    if (storedApproval.decision === "adjusted") {
+      const adjustmentResult = applyApprovalAdjustments(
+        payoutBatch.payouts,
+        storedApproval.adjustments
+      );
+      if (adjustmentResult.status !== "ok") {
+        await appendAuditEvent("payout_execution_skipped", {
+          reason: adjustmentResult.reason,
+          candidate_payout_count: payoutBatch.payouts.length,
+        });
+        await appendObservability({
+          pagesFetched,
+          libraryCount,
+          anomalyDetected: false,
+          anomalyCodes: [],
+          payoutOutcome: "skipped",
+          candidatePayoutCount: payoutBatch.payouts.length,
+          executedCount: 0,
+          skipReason: adjustmentResult.reason,
+        });
+        return { status: "skip", reason: adjustmentResult.reason };
+      }
+      payoutExecutionCandidates = adjustmentResult.payouts;
+      notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
+    }
+  } else {
+    await appendAuditEvent("payout_approval_resolved", {
+      source: "callback",
+      payout_batch_hash: payoutBatchHash,
+      decision: approval.approved ? "approved" : "denied",
+      reason: approval.reason,
+      adjustments_count: approval.adjusted_payouts?.length ?? 0,
+    });
+    if (approval.adjusted_payouts && approval.adjusted_payouts.length > 0) {
+      const callbackAdjustmentResult = applyCallbackAdjustedPayouts(
+        payoutBatch.payouts,
+        approval.adjusted_payouts
+      );
+      if (callbackAdjustmentResult.status !== "ok") {
+        await appendAuditEvent("payout_execution_skipped", {
+          reason: callbackAdjustmentResult.reason,
+          candidate_payout_count: payoutBatch.payouts.length,
+        });
+        await appendObservability({
+          pagesFetched,
+          libraryCount,
+          anomalyDetected: false,
+          anomalyCodes: [],
+          payoutOutcome: "skipped",
+          candidatePayoutCount: payoutBatch.payouts.length,
+          executedCount: 0,
+          skipReason: callbackAdjustmentResult.reason,
+        });
+        return {
+          status: "skip",
+          reason: callbackAdjustmentResult.reason,
+        };
+      }
+      payoutExecutionCandidates = callbackAdjustmentResult.payouts;
+      notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
+    }
+  }
+
+  if (approval && !approval.approved) {
+    await appendAuditEvent("payout_execution_skipped", {
+      reason: approval.reason ?? "approval_required",
+      candidate_payout_count: payoutExecutionCandidates.length,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutExecutionCandidates.length,
+      executedCount: 0,
+      skipReason: approval.reason ?? "approval_required",
+    });
+    return {
+      status: "skip",
+      reason: approval.reason ?? "approval_required",
+    };
+  }
+
+  return { status: "continue", payoutExecutionCandidates };
+}
+
 export async function runRoyaltyCycle(
   input: unknown,
   options: RunRoyaltyCycleOptions = {}
@@ -423,7 +739,6 @@ export async function runRoyaltyCycle(
   const notes: string[] = [];
   const mediumRisk = options.maxAllowedRisk ?? "medium";
   const payoutRisk = options.payoutMaxAllowedRisk ?? "high";
-  const eventStore = options.eventStore ?? defaultEventStore;
   const runEpochMs = options.now?.() ?? Date.now();
   const runId = `rrn_${createHash("sha256")
     .update(parsedInput.period)
@@ -462,16 +777,9 @@ export async function runRoyaltyCycle(
     return Math.max(0, runEpochMs - lastIngestedAtMs);
   })();
 
-  const appendAuditEvent = async (
-    eventType:
-      | "cycle_no_usage"
-      | "allocation_proposal_persisted"
-      | "payout_approval_required"
-      | "payout_approval_resolved"
-      | "payout_anomaly_detected"
-      | "payout_execution_skipped"
-      | "payout_execution_executed",
-    payload: Record<string, unknown> = {}
+  const appendAuditEvent: AppendAuditEvent = async (
+    eventType,
+    payload = {}
   ) => {
     await appendRoyaltyCycleAuditEvent(
       {
@@ -495,16 +803,7 @@ export async function runRoyaltyCycle(
     );
   };
 
-  const appendObservability = async (input: {
-    pagesFetched: number;
-    libraryCount: number;
-    anomalyDetected: boolean;
-    anomalyCodes: string[];
-    payoutOutcome: "executed" | "skipped";
-    candidatePayoutCount: number;
-    executedCount: number;
-    skipReason?: string;
-  }) => {
+  const appendObservability: AppendObservability = async (input) => {
     try {
       await recordRoyaltyObservabilitySample(
         {
@@ -567,40 +866,11 @@ export async function runRoyaltyCycle(
     }
   };
 
-  const usageStats: AggregatedLibraryUsage[] = [];
-  let cursor: string | undefined;
-  let pagesFetched = 0;
-  do {
-    const page: AggregateUsageForPeriodOutput = await aggregateUsageForPeriod(
-      {
-        period_start: parsedInput.period_start,
-        period_end: parsedInput.period_end,
-        ...(cursor === undefined ? {} : { cursor }),
-        page_size: parsedInput.page_size,
-      },
-      {
-        eventStore,
-        ...(options.resolveLibraryId === undefined
-          ? {}
-          : { resolveLibraryId: options.resolveLibraryId }),
-        ...(options.now === undefined ? {} : { now: options.now }),
-        maxAllowedRisk: mediumRisk,
-        ...(options.maxAggregationPeriodDays === undefined
-          ? {}
-          : { maxAggregationPeriodDays: options.maxAggregationPeriodDays }),
-        ...(options.principal === undefined ? {} : { principal: options.principal }),
-        ...(options.runtimeEnvironment === undefined
-          ? {}
-          : { runtimeEnvironment: options.runtimeEnvironment }),
-        ...(options.allowTestAuthBypass === undefined
-          ? {}
-          : { allowTestAuthBypass: options.allowTestAuthBypass }),
-      }
-    );
-    usageStats.push(...page.aggregates);
-    cursor = page.next_cursor;
-    pagesFetched += 1;
-  } while (cursor);
+  const { usageStats, pagesFetched } = await collectUsageAggregates(
+    parsedInput,
+    options,
+    mediumRisk
+  );
 
   if (usageStats.length === 0) {
     notes.push("no usage aggregates found for requested period");
@@ -759,221 +1029,27 @@ export async function runRoyaltyCycle(
     notes,
   });
 
-  const anomalyResult = options.detectPayoutAnomalies
-    ? await options.detectPayoutAnomalies({
-        payoutBatch,
-        allocation,
-      })
-    : detectPayoutAnomalies({
-        payoutBatch,
-        allocation,
-      });
-  const anomalyDetails = anomalyResult as DetectPayoutAnomaliesResult;
-  if (anomalyResult.has_anomaly) {
-    if (
-      Array.isArray(anomalyDetails.codes) &&
-      anomalyDetails.codes.length > 0
-    ) {
-      notes.push(`anomaly_codes=${anomalyDetails.codes.join(",")}`);
-    }
-    await appendAuditEvent("payout_anomaly_detected", {
-      reason: anomalyResult.reason ?? "payout_anomaly_detected",
-      codes:
-        Array.isArray(anomalyDetails.codes) && anomalyDetails.codes.length > 0
-          ? anomalyDetails.codes
-          : [],
-    });
-    await appendAuditEvent("payout_execution_skipped", {
-      reason: anomalyResult.reason ?? "payout_anomaly_detected",
-      candidate_payout_count: payoutBatch.payouts.length,
-    });
-    await appendObservability({
-      pagesFetched,
-      libraryCount: usageStats.length,
-      anomalyDetected: true,
-      anomalyCodes:
-        Array.isArray(anomalyDetails.codes) && anomalyDetails.codes.length > 0
-          ? anomalyDetails.codes
-          : [],
-      payoutOutcome: "skipped",
-      candidatePayoutCount: payoutBatch.payouts.length,
-      executedCount: 0,
-      skipReason: anomalyResult.reason ?? "payout_anomaly_detected",
-    });
+  const approvalResolution = await resolvePayoutExecutionCandidates({
+    period: parsedInput.period,
+    payoutBatchHash,
+    payoutBatch,
+    allocation,
+    persistence,
+    options,
+    notes,
+    pagesFetched,
+    libraryCount: usageStats.length,
+    appendAuditEvent,
+    appendObservability,
+  });
+  if (approvalResolution.status === "skip") {
     return buildCompletedOutput({
       status: "skipped",
-      reason: anomalyResult.reason ?? "payout_anomaly_detected",
+      reason: approvalResolution.reason,
       executed_count: 0,
     });
   }
-
-  let payoutExecutionCandidates = payoutBatch.payouts;
-  const approval = options.approvePayoutBatch
-    ? await options.approvePayoutBatch({
-        payoutBatch,
-        allocation,
-        persistence,
-      })
-    : null;
-
-  if (!approval) {
-    const storedApproval = options.resolvePayoutBatchApproval
-      ? await options.resolvePayoutBatchApproval({
-          period: parsedInput.period,
-          payoutBatchHash,
-          payoutBatch,
-          allocation,
-          persistence,
-        })
-      : getInMemoryPayoutBatchApproval(parsedInput.period, payoutBatchHash);
-
-    if (!storedApproval) {
-      await appendAuditEvent("payout_approval_required", {
-        payout_batch_hash: payoutBatchHash,
-      });
-      await appendAuditEvent("payout_execution_skipped", {
-        reason: "approval_required",
-        candidate_payout_count: payoutBatch.payouts.length,
-      });
-      await appendObservability({
-        pagesFetched,
-        libraryCount: usageStats.length,
-        anomalyDetected: false,
-        anomalyCodes: [],
-        payoutOutcome: "skipped",
-        candidatePayoutCount: payoutBatch.payouts.length,
-        executedCount: 0,
-        skipReason: "approval_required",
-      });
-      return buildCompletedOutput({
-        status: "skipped",
-        reason: "approval_required",
-        executed_count: 0,
-      });
-    }
-
-    notes.push(`approval_decision=${storedApproval.decision}`);
-    notes.push(`approval_reviewer=${storedApproval.reviewer_id}`);
-    await appendAuditEvent("payout_approval_resolved", {
-      source: "stored",
-      payout_batch_hash: payoutBatchHash,
-      decision: storedApproval.decision,
-      reviewer_id: storedApproval.reviewer_id,
-      reason: storedApproval.reason,
-      adjustments_count: storedApproval.adjustments.length,
-    });
-
-    if (storedApproval.decision === "denied") {
-      await appendAuditEvent("payout_execution_skipped", {
-        reason: storedApproval.reason || "payout_batch_denied",
-        candidate_payout_count: payoutBatch.payouts.length,
-      });
-      await appendObservability({
-        pagesFetched,
-        libraryCount: usageStats.length,
-        anomalyDetected: false,
-        anomalyCodes: [],
-        payoutOutcome: "skipped",
-        candidatePayoutCount: payoutBatch.payouts.length,
-        executedCount: 0,
-        skipReason: storedApproval.reason || "payout_batch_denied",
-      });
-      return buildCompletedOutput({
-        status: "skipped",
-        reason: storedApproval.reason || "payout_batch_denied",
-        executed_count: 0,
-      });
-    }
-
-    if (storedApproval.decision === "adjusted") {
-      const adjustmentResult = applyApprovalAdjustments(
-        payoutBatch.payouts,
-        storedApproval.adjustments
-      );
-      if (adjustmentResult.status !== "ok") {
-        await appendAuditEvent("payout_execution_skipped", {
-          reason: adjustmentResult.reason,
-          candidate_payout_count: payoutBatch.payouts.length,
-        });
-        await appendObservability({
-          pagesFetched,
-          libraryCount: usageStats.length,
-          anomalyDetected: false,
-          anomalyCodes: [],
-          payoutOutcome: "skipped",
-          candidatePayoutCount: payoutBatch.payouts.length,
-          executedCount: 0,
-          skipReason: adjustmentResult.reason,
-        });
-        return buildCompletedOutput({
-          status: "skipped",
-          reason: adjustmentResult.reason,
-          executed_count: 0,
-        });
-      }
-      payoutExecutionCandidates = adjustmentResult.payouts;
-      notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
-    }
-  } else {
-    await appendAuditEvent("payout_approval_resolved", {
-      source: "callback",
-      payout_batch_hash: payoutBatchHash,
-      decision: approval.approved ? "approved" : "denied",
-      reason: approval.reason,
-      adjustments_count: approval.adjusted_payouts?.length ?? 0,
-    });
-    if (approval.adjusted_payouts && approval.adjusted_payouts.length > 0) {
-      const callbackAdjustmentResult = applyCallbackAdjustedPayouts(
-        payoutBatch.payouts,
-        approval.adjusted_payouts
-      );
-      if (callbackAdjustmentResult.status !== "ok") {
-        await appendAuditEvent("payout_execution_skipped", {
-          reason: callbackAdjustmentResult.reason,
-          candidate_payout_count: payoutBatch.payouts.length,
-        });
-        await appendObservability({
-          pagesFetched,
-          libraryCount: usageStats.length,
-          anomalyDetected: false,
-          anomalyCodes: [],
-          payoutOutcome: "skipped",
-          candidatePayoutCount: payoutBatch.payouts.length,
-          executedCount: 0,
-          skipReason: callbackAdjustmentResult.reason,
-        });
-        return buildCompletedOutput({
-          status: "skipped",
-          reason: callbackAdjustmentResult.reason,
-          executed_count: 0,
-        });
-      }
-      payoutExecutionCandidates = callbackAdjustmentResult.payouts;
-      notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
-    }
-  }
-
-  if (approval && !approval.approved) {
-    await appendAuditEvent("payout_execution_skipped", {
-      reason: approval.reason ?? "approval_required",
-      candidate_payout_count: payoutExecutionCandidates.length,
-    });
-    await appendObservability({
-      pagesFetched,
-      libraryCount: usageStats.length,
-      anomalyDetected: false,
-      anomalyCodes: [],
-      payoutOutcome: "skipped",
-      candidatePayoutCount: payoutExecutionCandidates.length,
-      executedCount: 0,
-      skipReason: approval.reason ?? "approval_required",
-    });
-    return buildCompletedOutput({
-      status: "skipped",
-      reason: approval.reason ?? "approval_required",
-      executed_count: 0,
-    });
-  }
+  const payoutExecutionCandidates = approvalResolution.payoutExecutionCandidates;
 
   if (!options.executePayouts) {
     await appendAuditEvent("payout_execution_skipped", {

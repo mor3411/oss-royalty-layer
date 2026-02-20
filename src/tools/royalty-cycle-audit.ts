@@ -165,6 +165,7 @@ const inMemoryRoyaltyCycleAuditStore: RoyaltyCycleAuditStore = {
         }
         inMemoryAuditRecordsByPeriod.delete(oldestPeriod);
         inMemoryTruncatedAuditPeriods.delete(oldestPeriod);
+        inMemoryTruncationBoundaryHash.delete(oldestPeriod);
       }
     }
 

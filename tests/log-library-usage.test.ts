@@ -611,6 +611,10 @@ describe("logLibraryUsage", () => {
       const allowed = await logLibraryUsage(input, {
         allowInMemoryGuardsInProduction: true,
         auditRejection,
+        principal: {
+          principal_id: "svc-telemetry-1",
+          role: "service",
+        },
       });
 
       expect(rejected).toEqual({
@@ -660,11 +664,19 @@ describe("logLibraryUsage", () => {
         replayProtection,
         rateLimiter,
         rejectionAuditFilePath: ".data/test-library-usage-rejection-audits.ndjson",
+        principal: {
+          principal_id: "svc-telemetry-1",
+          role: "service",
+        },
       });
       const second = await logLibraryUsage(input, {
         replayProtection,
         rateLimiter,
         rejectionAuditFilePath: ".data/test-library-usage-rejection-audits.ndjson",
+        principal: {
+          principal_id: "svc-telemetry-1",
+          role: "service",
+        },
       });
 
       expect(first).toEqual({
@@ -674,6 +686,52 @@ describe("logLibraryUsage", () => {
       expect(second).toEqual({
         status: "ok",
         recorded_count: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.stubEnv("NODE_ENV", "test");
+    }
+  });
+
+  it("rejects production calls without an authenticated principal", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    const replayProtection = {
+      cleanup: vi.fn(),
+      reserve: vi.fn(() => true),
+      release: vi.fn(),
+    };
+    const rateLimiter = {
+      cleanup: vi.fn(),
+      consume: vi.fn(() => true),
+      refund: vi.fn(),
+    };
+
+    try {
+      const result = await logLibraryUsage(
+        {
+          session_id: SESSION_IDS.one,
+          source: "api",
+          ts: "2026-02-17T12:00:00.000Z",
+          libraries: [
+            {
+              name: "zod",
+              ecosystem: "npm",
+              version: "3.23.8",
+              calls: 1,
+            },
+          ],
+        },
+        {
+          replayProtection,
+          rateLimiter,
+          rejectionAuditFilePath: ".data/test-library-usage-rejection-audits.ndjson",
+        }
+      );
+
+      expect(result).toEqual({
+        status: "rejected",
+        reason: "authorization_failed",
       });
     } finally {
       vi.unstubAllEnvs();

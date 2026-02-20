@@ -3,6 +3,11 @@ import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
 import {
+  RESERVED_PRINCIPAL_IDS,
+  assertToolAuthorized,
+  type AuthorizationRuntimeEnvironment,
+} from "./authz.js";
+import {
   DEFAULT_MAX_GUARDRAIL_INPUT_BYTES,
   assertToolInputVetting,
   assertToolOutputSanity,
@@ -75,6 +80,7 @@ const LogLibraryUsageRejectionReasonSchema = z.enum([
   "enqueue_failed",
   "guardrails_not_configured",
   "guardrail_failure",
+  "authorization_failed",
 ]);
 
 export const LibraryUsageRejectionAuditSchema = z.object({
@@ -139,7 +145,9 @@ export type LogLibraryUsageOptions = {
   maxGuardrailInputBytes?: number;
   maxAllowedRisk?: ToolRiskLevel;
   allowInMemoryGuardsInProduction?: boolean;
-  runtimeEnvironment?: "development" | "test" | "production";
+  runtimeEnvironment?: AuthorizationRuntimeEnvironment;
+  principal?: unknown;
+  allowTestAuthBypass?: boolean;
 };
 
 const inMemoryLibraryUsageEvents: LibraryUsageLoggedEvent[] = [];
@@ -754,6 +762,26 @@ export async function logLibraryUsage(
     !options.allowInMemoryGuardsInProduction
   ) {
     return reject("guardrails_not_configured");
+  }
+
+  try {
+    const principal = assertToolAuthorized({
+      toolName: "log_library_usage",
+      ...(options.principal === undefined ? {} : { principal: options.principal }),
+      runtimeEnvironment,
+      ...(options.allowTestAuthBypass === undefined
+        ? {}
+        : { allowTestBypass: options.allowTestAuthBypass }),
+    });
+    if (
+      runtimeEnvironment === "production" &&
+      (principal.principal_id === RESERVED_PRINCIPAL_IDS.ANONYMOUS ||
+        principal.principal_id === RESERVED_PRINCIPAL_IDS.TEST_AUTH_BYPASS)
+    ) {
+      return reject("authorization_failed");
+    }
+  } catch {
+    return reject("authorization_failed");
   }
 
   try {

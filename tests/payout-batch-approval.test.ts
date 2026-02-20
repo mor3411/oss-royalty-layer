@@ -35,7 +35,6 @@ describe("payout batch approval tool", () => {
       period: "2026-02",
       payout_batch_hash: payoutBatchHash,
       decision: "approved",
-      reviewer_id: "fin.reviewer",
       reason: "manual review accepted",
     }, {
       principal: {
@@ -58,7 +57,6 @@ describe("payout batch approval tool", () => {
         period: "2026-02",
         payout_batch_hash: "a".repeat(64),
         decision: "adjusted",
-        reviewer_id: "fin.reviewer",
         reason: "adjusting payout",
       }, {
         principal: {
@@ -77,7 +75,6 @@ describe("payout batch approval tool", () => {
           period: "2026-02",
           payout_batch_hash: "b".repeat(64),
           decision: "denied",
-          reviewer_id: "fin.reviewer",
           reason: "denied by policy",
         },
         {
@@ -95,7 +92,6 @@ describe("payout batch approval tool", () => {
       period: "2026-03",
       payout_batch_hash: hash,
       decision: "approved",
-      reviewer_id: "fin.reviewer",
       reason: "first approval",
     }, {
       principal: {
@@ -109,7 +105,6 @@ describe("payout batch approval tool", () => {
         period: "2026-03",
         payout_batch_hash: hash,
         decision: "denied",
-        reviewer_id: "fin.reviewer",
         reason: "attempt to overwrite",
       }, {
         principal: {
@@ -120,7 +115,7 @@ describe("payout batch approval tool", () => {
     ).rejects.toThrowError("approvals are immutable");
   });
 
-  it("binds reviewer_id to authenticated principal when a real principal is provided", async () => {
+  it("records reviewer identity from authenticated principal", async () => {
     clearInMemoryPayoutBatchApprovals();
 
     const hash = "d".repeat(64);
@@ -129,7 +124,6 @@ describe("payout batch approval tool", () => {
         period: "2026-03",
         payout_batch_hash: hash,
         decision: "approved",
-        reviewer_id: "caller-supplied-id",
         reason: "approved by principal",
       },
       {
@@ -154,7 +148,6 @@ describe("payout batch approval tool", () => {
           period: "2026-02",
           payout_batch_hash: "e".repeat(64),
           decision: "approved",
-          reviewer_id: "fin.reviewer",
           reason: "manual review accepted",
         },
         {

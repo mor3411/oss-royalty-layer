@@ -50,7 +50,6 @@ export const RecordPayoutBatchApprovalInputSchema = z
     period: PeriodSchema,
     payout_batch_hash: PayoutBatchHashSchema,
     decision: PayoutBatchApprovalDecisionSchema,
-    reviewer_id: z.string().min(1),
     reason: z.string().min(1),
     adjustments: z.array(PayoutBatchAdjustmentSchema).default([]),
   })
