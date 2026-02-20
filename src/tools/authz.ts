@@ -28,6 +28,12 @@ export type ToolPrincipal = z.infer<typeof ToolPrincipalSchema>;
 
 export const DEFAULT_ALLOW_TEST_AUTH_BYPASS = false;
 
+/** Sentinel principal IDs for synthetic (non-authenticated) principals. */
+export const RESERVED_PRINCIPAL_IDS = {
+  TEST_AUTH_BYPASS: "test-auth-bypass",
+  ANONYMOUS: "anonymous",
+} as const;
+
 const INTERNAL_TOOL_NAMES = new Set<GuardrailedToolName>([
   "aggregate_usage_for_period",
   "validate_allocation_constraints",
@@ -79,7 +85,9 @@ function resolveAllowTestBypass(override: boolean | undefined): boolean {
   const parsedEnv = AuthorizationRuntimeEnvironmentSchema.safeParse(
     process.env.NODE_ENV
   );
-  if (parsedEnv.success && parsedEnv.data === "production") {
+  // Only allow test bypass when NODE_ENV is explicitly "test".
+  // Any other value (production, development, absent, unknown) disables bypass.
+  if (!parsedEnv.success || parsedEnv.data !== "test") {
     return false;
   }
   if (override !== undefined) {
@@ -107,7 +115,7 @@ export function assertToolAuthorized(options: {
     options.principal === undefined
   ) {
     return {
-      principal_id: "test-auth-bypass",
+      principal_id: RESERVED_PRINCIPAL_IDS.TEST_AUTH_BYPASS,
       role: "service",
       scopes: [],
     };
@@ -116,7 +124,7 @@ export function assertToolAuthorized(options: {
   if (!requiresToolAuthorization(options.toolName)) {
     if (options.principal === undefined) {
       return {
-        principal_id: "anonymous",
+        principal_id: RESERVED_PRINCIPAL_IDS.ANONYMOUS,
         role: "viewer",
         scopes: [],
       };

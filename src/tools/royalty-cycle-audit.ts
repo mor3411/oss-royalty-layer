@@ -25,7 +25,11 @@ export const RoyaltyCycleAuditEventTypeSchema = z.enum([
   "payout_execution_executed",
 ]);
 
-export const RoyaltyCycleAuditPayloadSchema = z.record(z.string().min(1), z.unknown());
+const SAFE_PAYLOAD_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+export const RoyaltyCycleAuditPayloadSchema = z.record(
+  z.string().min(1).regex(SAFE_PAYLOAD_KEY, "payload keys must be alphanumeric/underscore identifiers"),
+  z.unknown()
+);
 
 export const RoyaltyCycleAuditRecordSchema = z.object({
   event_id: z.string().min(1),
@@ -199,7 +203,7 @@ function normalizeForHash(value: unknown): unknown {
     const keys = Object.keys(objectValue).sort((left, right) =>
       left.localeCompare(right)
     );
-    const normalized: Record<string, unknown> = {};
+    const normalized = Object.create(null) as Record<string, unknown>;
     for (const key of keys) {
       normalized[key] = normalizeForHash(objectValue[key]);
     }

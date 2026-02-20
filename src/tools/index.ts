@@ -1,6 +1,7 @@
 export {
   AuthorizationRuntimeEnvironmentSchema,
   DEFAULT_ALLOW_TEST_AUTH_BYPASS,
+  RESERVED_PRINCIPAL_IDS,
   ToolPrincipalRoleSchema,
   ToolPrincipalSchema,
   assertToolAuthorized,

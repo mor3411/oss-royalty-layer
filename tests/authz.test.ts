@@ -84,4 +84,36 @@ describe("tool authorization", () => {
       process.env.NODE_ENV = originalNodeEnv;
     }
   });
+
+  it("rejects test bypass when NODE_ENV is development even with allowTestBypass true", () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "development";
+      expect(() =>
+        assertToolAuthorized({
+          toolName: "aggregate_usage_for_period",
+          runtimeEnvironment: "test",
+          allowTestBypass: true,
+        })
+      ).toThrowError("authorization required");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
+  it("rejects test bypass when NODE_ENV is absent", () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      delete process.env.NODE_ENV;
+      expect(() =>
+        assertToolAuthorized({
+          toolName: "aggregate_usage_for_period",
+          runtimeEnvironment: "test",
+          allowTestBypass: true,
+        })
+      ).toThrowError("authorization required");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
 });

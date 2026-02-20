@@ -1053,10 +1053,13 @@ export async function runRoyaltyCycle(
   }
 
   if (usingDefaultClaimStore) {
-    const resolvedEnv = options.runtimeEnvironment ??
-      (AuthorizationRuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV).success
-        ? (AuthorizationRuntimeEnvironmentSchema.parse(process.env.NODE_ENV) as AuthorizationRuntimeEnvironment)
-        : "production");
+    const parsedProcessEnv = AuthorizationRuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV);
+    // Mirror authz.ts: when NODE_ENV is production, ignore overrides.
+    const resolvedEnv =
+      (parsedProcessEnv.success && parsedProcessEnv.data === "production")
+        ? "production"
+        : (options.runtimeEnvironment ??
+            (parsedProcessEnv.success ? parsedProcessEnv.data : "production"));
     if (resolvedEnv === "production") {
       throw new Error(
         "payout execution requires a durable executionClaimStore in production; " +

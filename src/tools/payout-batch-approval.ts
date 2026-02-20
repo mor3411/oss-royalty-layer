@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   assertToolAuthorized,
+  RESERVED_PRINCIPAL_IDS,
   type AuthorizationRuntimeEnvironment,
 } from "./authz.js";
 import {
@@ -123,7 +124,8 @@ export type PayoutBatchApprovalStore = {
       | Promise<PayoutBatchApprovalRecord | null>
       | PayoutBatchApprovalRecord
       | null;
-  upsertRecord: (record: PayoutBatchApprovalRecord) => Promise<void> | void;
+  /** Insert a new approval record. Must throw if a record for the same (period, payout_batch_hash) already exists. */
+  insertRecord: (record: PayoutBatchApprovalRecord) => Promise<void> | void;
   readAllRecords?: () => Promise<PayoutBatchApprovalRecord[]> | PayoutBatchApprovalRecord[];
   clear?: () => Promise<void> | void;
 };
@@ -167,11 +169,15 @@ const inMemoryPayoutBatchApprovalStore: PayoutBatchApprovalStore = {
     return record ? cloneApprovalRecord(record) : null;
   },
 
-  upsertRecord(record: PayoutBatchApprovalRecord): void {
-    inMemoryApprovalsByKey.set(
-      toStoreKey(record.period, record.payout_batch_hash),
-      cloneApprovalRecord(record)
-    );
+  insertRecord(record: PayoutBatchApprovalRecord): void {
+    const key = toStoreKey(record.period, record.payout_batch_hash);
+    if (inMemoryApprovalsByKey.has(key)) {
+      throw new Error(
+        `approval record already exists for period ${record.period} ` +
+        `and batch hash ${record.payout_batch_hash}`
+      );
+    }
+    inMemoryApprovalsByKey.set(key, cloneApprovalRecord(record));
   },
 
   readAllRecords(): PayoutBatchApprovalRecord[] {
@@ -318,8 +324,8 @@ export async function recordPayoutBatchApproval(
   }
 
   const effectiveReviewerId =
-    principal.principal_id !== "test-auth-bypass" &&
-    principal.principal_id !== "anonymous"
+    principal.principal_id !== RESERVED_PRINCIPAL_IDS.TEST_AUTH_BYPASS &&
+    principal.principal_id !== RESERVED_PRINCIPAL_IDS.ANONYMOUS
       ? principal.principal_id
       : parsedInput.reviewer_id;
 
@@ -337,7 +343,7 @@ export async function recordPayoutBatchApproval(
     adjustments: parsedInput.adjustments,
     reviewed_at: reviewedAt,
   };
-  await store.upsertRecord(record);
+  await store.insertRecord(record);
 
   const output: RecordPayoutBatchApprovalOutput = {
     status: "recorded",
