@@ -25,6 +25,7 @@ const AGGREGATION_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const MAX_AGGREGATION_SNAPSHOTS = 256;
 export const MAX_AGGREGATION_SNAPSHOT_ROWS = MAX_GUARDRAIL_AGGREGATE_OUTPUT_ROWS;
 const SAFE_INTEGER_SCHEMA = z.number().int().safe();
+const LIBRARY_ID_RESOLUTION_CONCURRENCY = 32;
 
 export const AggregateUsageForPeriodInputSchema = z
   .object({
@@ -178,7 +179,40 @@ async function buildAggregates(
   const periodStartMs = Date.parse(parsedInput.period_start);
   const periodEndMs = Date.parse(parsedInput.period_end);
   const byLibrary = new Map<string, { totalCalls: number; sessionIds: Set<string> }>();
-  const resolvedLibraryIdsByKey = new Map<string, Promise<string>>();
+  const referencesByLibraryKey = new Map<string, CanonicalLibraryReference>();
+
+  for (const envelope of envelopes) {
+    const eventTsMs = Date.parse(envelope.event.ts);
+    if (eventTsMs < periodStartMs || eventTsMs >= periodEndMs) {
+      continue;
+    }
+    const libraryKey = `${envelope.event.library.ecosystem}:${envelope.event.library.name}`;
+    if (!referencesByLibraryKey.has(libraryKey)) {
+      referencesByLibraryKey.set(libraryKey, {
+        ecosystem: envelope.event.library.ecosystem,
+        name: envelope.event.library.name,
+      });
+    }
+  }
+
+  const libraryIdsByKey = new Map<string, string>();
+  const resolverEntries = [...referencesByLibraryKey.entries()];
+  for (
+    let index = 0;
+    index < resolverEntries.length;
+    index += LIBRARY_ID_RESOLUTION_CONCURRENCY
+  ) {
+    const chunk = resolverEntries.slice(index, index + LIBRARY_ID_RESOLUTION_CONCURRENCY);
+    const resolvedChunk = await Promise.all(
+      chunk.map(async ([libraryKey, reference]): Promise<[string, string]> => [
+        libraryKey,
+        await resolveLibraryId(reference),
+      ])
+    );
+    for (const [libraryKey, libraryId] of resolvedChunk) {
+      libraryIdsByKey.set(libraryKey, libraryId);
+    }
+  }
 
   for (const envelope of envelopes) {
     const eventTsMs = Date.parse(envelope.event.ts);
@@ -187,17 +221,10 @@ async function buildAggregates(
     }
 
     const libraryKey = `${envelope.event.library.ecosystem}:${envelope.event.library.name}`;
-    let libraryIdPromise = resolvedLibraryIdsByKey.get(libraryKey);
-    if (!libraryIdPromise) {
-      libraryIdPromise = Promise.resolve(
-        resolveLibraryId({
-          ecosystem: envelope.event.library.ecosystem,
-          name: envelope.event.library.name,
-        })
-      );
-      resolvedLibraryIdsByKey.set(libraryKey, libraryIdPromise);
+    const libraryId = libraryIdsByKey.get(libraryKey);
+    if (!libraryId) {
+      throw new Error(`missing library_id mapping for key ${libraryKey}`);
     }
-    const libraryId = await libraryIdPromise;
 
     const existing = byLibrary.get(libraryId) ?? {
       totalCalls: 0,

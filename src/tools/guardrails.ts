@@ -87,6 +87,29 @@ const ValidateAllocationConstraintsOutputSanitySchema = z.object({
   ),
 });
 
+const ComputeAllocationsOutputSanitySchema = z.object({
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  pool_amount_minor: z.number().int().positive(),
+  policy_applied: z.object({
+    configured_max_share_per_library: z.number().min(0).max(1),
+    effective_max_share_per_library: z.number().min(0).max(1),
+    min_floor_amount_minor: z.number().int().nonnegative(),
+    long_tail_weight: z.number().positive(),
+  }),
+  allocations: z
+    .array(
+      z.object({
+        library_id: z.string().min(1),
+        maintainer_id: z.string().min(1),
+        amount_minor: z.number().int().nonnegative(),
+        confidence_score: z.number().min(0).max(1),
+        flags: z.array(z.string().min(1)),
+      })
+    )
+    .min(1),
+  notes: z.string().min(1),
+});
+
 const PersistAllocationsOutputSanitySchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ok"),
@@ -261,6 +284,37 @@ export function assertToolOutputSanity(
     }
     if (parsedOutput.status === "invalid" && parsedOutput.violations.length === 0) {
       throw new Error("invalid allocation constraint output must include at least one violation");
+    }
+    return;
+  }
+
+  if (toolName === "compute_allocations") {
+    const parsedOutput = ComputeAllocationsOutputSanitySchema.parse(output);
+    if (
+      parsedOutput.policy_applied.effective_max_share_per_library <
+      parsedOutput.policy_applied.configured_max_share_per_library
+    ) {
+      throw new Error(
+        "compute_allocations effective_max_share_per_library cannot be below configured value"
+      );
+    }
+
+    const totalAllocated = parsedOutput.allocations.reduce(
+      (sum, allocation) => sum + BigInt(allocation.amount_minor),
+      0n
+    );
+    if (totalAllocated !== BigInt(parsedOutput.pool_amount_minor)) {
+      throw new Error("compute_allocations total allocation does not equal pool amount");
+    }
+
+    const libraryIds = new Set<string>();
+    for (const allocation of parsedOutput.allocations) {
+      if (libraryIds.has(allocation.library_id)) {
+        throw new Error(
+          `compute_allocations contains duplicate library allocation: ${allocation.library_id}`
+        );
+      }
+      libraryIds.add(allocation.library_id);
     }
     return;
   }

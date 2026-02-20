@@ -68,6 +68,63 @@ describe("tool guardrails", () => {
     ).toThrowError("valid allocation constraint output cannot include violations");
   });
 
+  it("rejects compute allocations output when pool total does not match", () => {
+    expect(() =>
+      assertToolOutputSanity("compute_allocations", {
+        period: "2026-02",
+        pool_amount_minor: 100,
+        policy_applied: {
+          configured_max_share_per_library: 0.5,
+          effective_max_share_per_library: 0.5,
+          min_floor_amount_minor: 0,
+          long_tail_weight: 1,
+        },
+        allocations: [
+          {
+            library_id: "lib_alpha",
+            maintainer_id: "mnt_alpha",
+            amount_minor: 40,
+            confidence_score: 0.8,
+            flags: [],
+          },
+        ],
+        notes: "invalid output",
+      })
+    ).toThrowError("total allocation does not equal pool amount");
+  });
+
+  it("rejects compute allocations output with duplicate library entries", () => {
+    expect(() =>
+      assertToolOutputSanity("compute_allocations", {
+        period: "2026-02",
+        pool_amount_minor: 100,
+        policy_applied: {
+          configured_max_share_per_library: 0.5,
+          effective_max_share_per_library: 0.5,
+          min_floor_amount_minor: 0,
+          long_tail_weight: 1,
+        },
+        allocations: [
+          {
+            library_id: "lib_alpha",
+            maintainer_id: "mnt_alpha",
+            amount_minor: 50,
+            confidence_score: 0.8,
+            flags: [],
+          },
+          {
+            library_id: "lib_alpha",
+            maintainer_id: "mnt_beta",
+            amount_minor: 50,
+            confidence_score: 0.7,
+            flags: [],
+          },
+        ],
+        notes: "invalid output",
+      })
+    ).toThrowError("duplicate library allocation");
+  });
+
   it("rejects invalid persist allocation output payloads", () => {
     expect(() =>
       assertToolOutputSanity("persist_allocations", {

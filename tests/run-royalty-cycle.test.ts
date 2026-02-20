@@ -1114,6 +1114,158 @@ describe("runRoyaltyCycle", () => {
     ).toBe(true);
   });
 
+  it("retains execution claim after ambiguous payout adapter failures", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    const executePayouts = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("psp timeout"))
+      .mockResolvedValueOnce({
+        executed_count: 1,
+        results: [],
+      });
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 500,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      approvePayoutBatch: () => ({ approved: true }),
+      executePayouts,
+    };
+
+    await expect(runRoyaltyCycle(cycleInput, cycleOptions)).rejects.toThrowError("psp timeout");
+
+    const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(secondRun.status).toBe("completed");
+    if (secondRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(secondRun.execution).toEqual({
+      status: "skipped",
+      reason: "payout_execution_in_progress",
+      executed_count: 0,
+    });
+    expect(executePayouts).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases execution claim when adapter reports pre-execution failure", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    const preExecutionError = Object.assign(
+      new Error("provider rejected request before execution"),
+      { execution_state: "not_executed" as const }
+    );
+    const executePayouts = vi
+      .fn()
+      .mockRejectedValueOnce(preExecutionError)
+      .mockResolvedValueOnce({
+        executed_count: 1,
+        results: [],
+      });
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 500,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      approvePayoutBatch: () => ({ approved: true }),
+      executePayouts,
+    };
+
+    await expect(runRoyaltyCycle(cycleInput, cycleOptions)).rejects.toThrowError(
+      "provider rejected request before execution"
+    );
+
+    const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(secondRun.status).toBe("completed");
+    if (secondRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(secondRun.execution.status).toBe("executed");
+    expect(executePayouts).toHaveBeenCalledTimes(2);
+  });
+
   it("allows only one concurrent execution for the same approved payout batch", async () => {
     const pipeline = createLibraryUsageIngestionPipeline();
     const registry = createInMemoryLibraryRegistry();

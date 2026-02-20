@@ -106,6 +106,11 @@ export type ExecutePayoutsResult = {
   results?: unknown;
 };
 
+type ExecutePayoutsFailure = Error & {
+  execution_state?: "not_executed" | "unknown";
+  code?: string;
+};
+
 export type PayoutExecutionClaimStatus = "acquired" | "already_executed" | "in_progress";
 
 export type PayoutExecutionClaimStore = {
@@ -272,6 +277,17 @@ function resolveExecutionRuntimeEnvironment(
     return parsedProcessEnv.data;
   }
   return "production";
+}
+
+function isKnownPreExecutionFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const executionState = (error as ExecutePayoutsFailure).execution_state;
+  if (executionState === "not_executed") {
+    return true;
+  }
+  return (error as ExecutePayoutsFailure).code === "payout_not_executed";
 }
 
 function applyApprovalAdjustments(
@@ -1299,7 +1315,10 @@ export async function runRoyaltyCycle(
     // trigger a second transfer if audit/observability persistence fails.
     await executionClaimStore.markExecuted(payoutExecutionIdempotencyKey);
   } catch (error) {
-    if (!executionCompleted) {
+    if (!executionCompleted && isKnownPreExecutionFailure(error)) {
+      // Release only when the adapter explicitly confirms no transfer happened.
+      // For ambiguous failures (timeouts/network), keep the claim to prevent a
+      // potential duplicate payout on automatic retry.
       await executionClaimStore.releaseClaim(payoutExecutionIdempotencyKey);
     }
     throw error;
