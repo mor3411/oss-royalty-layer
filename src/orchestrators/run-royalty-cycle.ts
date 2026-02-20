@@ -103,6 +103,17 @@ export type ExecutePayoutsResult = {
   results?: unknown;
 };
 
+export type PayoutExecutionClaimStatus = "acquired" | "already_executed" | "in_progress";
+
+export type PayoutExecutionClaimStore = {
+  tryClaim:
+    (idempotencyKey: string) =>
+      | Promise<PayoutExecutionClaimStatus>
+      | PayoutExecutionClaimStatus;
+  markExecuted: (idempotencyKey: string) => Promise<void> | void;
+  releaseClaim: (idempotencyKey: string) => Promise<void> | void;
+};
+
 export type RunRoyaltyCycleOptions = {
   eventStore?: LibraryUsageEventStore;
   allocationStore?: AllocationPersistenceStore;
@@ -143,6 +154,7 @@ export type RunRoyaltyCycleOptions = {
   maxAllowedRisk?: ToolRiskLevel;
   payoutMaxAllowedRisk?: ToolRiskLevel;
   maxAggregationPeriodDays?: number;
+  executionClaimStore?: PayoutExecutionClaimStore;
 };
 
 export type RunRoyaltyCycleOutput =
@@ -190,6 +202,49 @@ const defaultEventStore: LibraryUsageEventStore = {
   readAll: () => getInMemoryLibraryUsageIngestionEvents(),
 };
 
+type InMemoryPayoutExecutionClaimState = "in_progress" | "executed";
+
+const inMemoryPayoutExecutionClaimStates = new Map<
+  string,
+  InMemoryPayoutExecutionClaimState
+>();
+
+/**
+ * Clears in-memory execution claims used by the orchestrator's default
+ * idempotency guard.
+ */
+export function clearInMemoryRunRoyaltyCycleExecutionClaims(): void {
+  inMemoryPayoutExecutionClaimStates.clear();
+}
+
+/**
+ * Default single-process claim store.
+ * For multi-instance deployments, inject a distributed implementation through
+ * `RunRoyaltyCycleOptions.executionClaimStore`.
+ */
+const inMemoryPayoutExecutionClaimStore: PayoutExecutionClaimStore = {
+  tryClaim(idempotencyKey: string): PayoutExecutionClaimStatus {
+    const state = inMemoryPayoutExecutionClaimStates.get(idempotencyKey);
+    if (state === "executed") {
+      return "already_executed";
+    }
+    if (state === "in_progress") {
+      return "in_progress";
+    }
+    inMemoryPayoutExecutionClaimStates.set(idempotencyKey, "in_progress");
+    return "acquired";
+  },
+  markExecuted(idempotencyKey: string): void {
+    inMemoryPayoutExecutionClaimStates.set(idempotencyKey, "executed");
+  },
+  releaseClaim(idempotencyKey: string): void {
+    if (inMemoryPayoutExecutionClaimStates.get(idempotencyKey) === "in_progress") {
+      inMemoryPayoutExecutionClaimStates.delete(idempotencyKey);
+    }
+  },
+};
+
+/** Parses and validates policy overrides with sensible defaults. */
 function buildComputePolicy(
   policy: RunRoyaltyCycleInput["policy_config"]
 ): ComputeAllocationsPolicy | undefined {
@@ -262,6 +317,10 @@ function applyApprovalAdjustments(
 
 const CallbackAdjustedPayoutsSchema = z.array(PayoutBatchEntrySchema).min(1);
 
+/**
+ * Normalizes callback-provided payout entries into safe amount-only
+ * adjustments, refusing any destination/account changes.
+ */
 function applyCallbackAdjustedPayouts(
   payouts: PayoutBatchEntry[],
   adjustedPayouts: unknown
@@ -643,6 +702,8 @@ export async function runRoyaltyCycle(
   });
   notes.push(`approval_hash=${payoutBatchHash}`);
   const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${payoutBatchHash}`;
+  const executionClaimStore =
+    options.executionClaimStore ?? inMemoryPayoutExecutionClaimStore;
 
   const anomalyResult = options.detectPayoutAnomalies
     ? await options.detectPayoutAnomalies({
@@ -1029,6 +1090,7 @@ export async function runRoyaltyCycle(
     return event.payload.payout_batch_hash === payoutBatchHash;
   });
   if (existingExecutionRecorded) {
+    await executionClaimStore.markExecuted(payoutExecutionIdempotencyKey);
     await appendAuditEvent("payout_execution_skipped", {
       reason: "already_executed",
       candidate_payout_count: payoutExecutionCandidates.length,
@@ -1066,27 +1128,86 @@ export async function runRoyaltyCycle(
     };
   }
 
-  assertToolAuthorized({
-    toolName: "execute_payouts",
-    ...(options.principal === undefined ? {} : { principal: options.principal }),
-    ...(options.runtimeEnvironment === undefined
-      ? {}
-      : { runtimeEnvironment: options.runtimeEnvironment }),
-    ...(options.allowTestAuthBypass === undefined
-      ? {}
-      : { allowTestBypass: options.allowTestAuthBypass }),
-  });
-  assertToolRiskAllowed({
-    toolName: "execute_payouts",
-    maxAllowedRisk: payoutRisk,
-  });
+  const claimStatus = await executionClaimStore.tryClaim(
+    payoutExecutionIdempotencyKey
+  );
+  if (claimStatus !== "acquired") {
+    const skipReason =
+      claimStatus === "already_executed"
+        ? "already_executed"
+        : "payout_execution_in_progress";
+    await appendAuditEvent("payout_execution_skipped", {
+      reason: skipReason,
+      candidate_payout_count: payoutExecutionCandidates.length,
+      payout_batch_hash: payoutBatchHash,
+      idempotency_key: payoutExecutionIdempotencyKey,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutExecutionCandidates.length,
+      executedCount: 0,
+      skipReason,
+    });
+    return {
+      status: "completed",
+      period: parsedInput.period,
+      pool_amount_minor: parsedInput.pool_amount_minor,
+      aggregation: {
+        pages_fetched: pagesFetched,
+        library_count: usageStats.length,
+        usage_stats: usageStats,
+      },
+      allocation,
+      persistence,
+      payout_batch: payoutBatch,
+      execution: {
+        status: "skipped",
+        reason: skipReason,
+        executed_count: 0,
+      },
+      notes,
+    };
+  }
 
-  const executionResult = await options.executePayouts({
-    period: parsedInput.period,
-    currency: payoutBatch.currency,
-    payouts: payoutExecutionCandidates,
-    idempotency_key: payoutExecutionIdempotencyKey,
-  });
+  let executionCompleted = false;
+  let executionResult: ExecutePayoutsResult;
+  try {
+    assertToolAuthorized({
+      toolName: "execute_payouts",
+      ...(options.principal === undefined ? {} : { principal: options.principal }),
+      ...(options.runtimeEnvironment === undefined
+        ? {}
+        : { runtimeEnvironment: options.runtimeEnvironment }),
+      ...(options.allowTestAuthBypass === undefined
+        ? {}
+        : { allowTestBypass: options.allowTestAuthBypass }),
+    });
+    assertToolRiskAllowed({
+      toolName: "execute_payouts",
+      maxAllowedRisk: payoutRisk,
+    });
+
+    executionResult = await options.executePayouts({
+      period: parsedInput.period,
+      currency: payoutBatch.currency,
+      payouts: payoutExecutionCandidates,
+      idempotency_key: payoutExecutionIdempotencyKey,
+    });
+    executionCompleted = true;
+    // Mark execution as completed before downstream writes so retries never
+    // trigger a second transfer if audit/observability persistence fails.
+    await executionClaimStore.markExecuted(payoutExecutionIdempotencyKey);
+  } catch (error) {
+    if (!executionCompleted) {
+      await executionClaimStore.releaseClaim(payoutExecutionIdempotencyKey);
+    }
+    throw error;
+  }
+
   await appendAuditEvent("payout_execution_executed", {
     candidate_payout_count: payoutExecutionCandidates.length,
     executed_count: executionResult.executed_count ?? payoutExecutionCandidates.length,

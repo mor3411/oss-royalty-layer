@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearInMemoryRunRoyaltyCycleExecutionClaims,
   runRoyaltyCycle,
   type ExecutePayoutsInput,
 } from "../src/orchestrators/run-royalty-cycle.js";
@@ -29,6 +30,7 @@ const SESSION_IDS = {
 
 describe("runRoyaltyCycle", () => {
   beforeEach(() => {
+    clearInMemoryRunRoyaltyCycleExecutionClaims();
     clearInMemoryLibraryUsageIngestionEvents();
     clearInMemoryPersistedAllocations();
     clearInMemoryMaintainerProfiles();
@@ -701,6 +703,113 @@ describe("runRoyaltyCycle", () => {
           event.payload.reason === "allocation_conflict_requires_review"
       )
     ).toBe(true);
+  });
+
+  it("allows only one concurrent execution for the same approved payout batch", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    const executePayouts = vi.fn(async (input: ExecutePayoutsInput) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return {
+        executed_count: input.payouts.length,
+        results: [],
+      };
+    });
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 500,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      executePayouts,
+    };
+
+    const firstRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(firstRun.status).toBe("completed");
+    if (firstRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(firstRun.execution.status).toBe("skipped");
+
+    const approvalHashNote = firstRun.notes.find((note) =>
+      note.startsWith("approval_hash=")
+    );
+    const approvalHash = approvalHashNote?.slice("approval_hash=".length);
+    if (!approvalHash) {
+      throw new Error("expected approval hash note");
+    }
+
+    await recordPayoutBatchApproval({
+      period: "2026-02",
+      payout_batch_hash: approvalHash,
+      decision: "approved",
+      reviewer_id: "fin.reviewer",
+      reason: "manual review passed",
+    });
+
+    const [concurrentA, concurrentB] = await Promise.all([
+      runRoyaltyCycle(cycleInput, cycleOptions),
+      runRoyaltyCycle(cycleInput, cycleOptions),
+    ]);
+    const concurrentRuns = [concurrentA, concurrentB];
+
+    const executedRuns = concurrentRuns.filter(
+      (run) => run.status === "completed" && run.execution.status === "executed"
+    );
+    const skippedRuns = concurrentRuns.filter(
+      (run) => run.status === "completed" && run.execution.status === "skipped"
+    );
+
+    expect(executedRuns).toHaveLength(1);
+    expect(skippedRuns).toHaveLength(1);
+    const skippedRun = skippedRuns[0];
+    if (!skippedRun || skippedRun.status !== "completed" || skippedRun.execution.status !== "skipped") {
+      throw new Error("expected one skipped run");
+    }
+    expect(["already_executed", "payout_execution_in_progress"]).toContain(
+      skippedRun.execution.reason
+    );
+    expect(executePayouts).toHaveBeenCalledTimes(1);
   });
 
   it("applies stored adjusted approval payouts before execution", async () => {
