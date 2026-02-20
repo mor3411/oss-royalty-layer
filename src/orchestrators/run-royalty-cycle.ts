@@ -711,7 +711,7 @@ export async function runRoyaltyCycle(
     totals: payoutBatch.totals,
   });
   notes.push(`approval_hash=${payoutBatchHash}`);
-  const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${payoutBatchHash}`;
+  const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${persistence.record_id}`;
   const executionClaimStore =
     options.executionClaimStore ?? inMemoryPayoutExecutionClaimStore;
   const buildCompletedOutput = (
@@ -992,22 +992,43 @@ export async function runRoyaltyCycle(
     });
   }
 
-  const existingExecutionRecorded = (
+  const periodAudits =
     (
       options.auditStore
         ? await options.auditStore.readByPeriod(parsedInput.period)
         : getInMemoryRoyaltyCycleAuditsByPeriod(parsedInput.period)
-    ) ?? []
-  ).some((event) => {
+    ) ?? [];
+  const runIdsByAllocationRecordId = new Set<string>();
+  for (const event of periodAudits) {
+    if (event.event_type !== "allocation_proposal_persisted") {
+      continue;
+    }
+    if (event.payload.record_id === persistence.record_id) {
+      runIdsByAllocationRecordId.add(event.run_id);
+    }
+  }
+
+  const existingExecutionRecorded = periodAudits.some((event) => {
     if (event.event_type !== "payout_execution_executed") {
       return false;
     }
+    if (runIdsByAllocationRecordId.has(event.run_id)) {
+      return true;
+    }
+    if (event.payload.allocation_record_id === persistence.record_id) {
+      return true;
+    }
+    if (event.payload.idempotency_key === payoutExecutionIdempotencyKey) {
+      return true;
+    }
+    // Backward compatibility for older executions keyed by payout batch hash.
     return event.payload.payout_batch_hash === payoutBatchHash;
   });
   if (existingExecutionRecorded) {
     await executionClaimStore.markExecuted(payoutExecutionIdempotencyKey);
     await appendAuditEvent("payout_execution_skipped", {
       reason: "already_executed",
+      allocation_record_id: persistence.record_id,
       candidate_payout_count: payoutExecutionCandidates.length,
       payout_batch_hash: payoutBatchHash,
       idempotency_key: payoutExecutionIdempotencyKey,
@@ -1039,6 +1060,7 @@ export async function runRoyaltyCycle(
         : "payout_execution_in_progress";
     await appendAuditEvent("payout_execution_skipped", {
       reason: skipReason,
+      allocation_record_id: persistence.record_id,
       candidate_payout_count: payoutExecutionCandidates.length,
       payout_batch_hash: payoutBatchHash,
       idempotency_key: payoutExecutionIdempotencyKey,
@@ -1096,6 +1118,7 @@ export async function runRoyaltyCycle(
   }
 
   await appendAuditEvent("payout_execution_executed", {
+    allocation_record_id: persistence.record_id,
     candidate_payout_count: payoutExecutionCandidates.length,
     executed_count: executionResult.executed_count ?? payoutExecutionCandidates.length,
     payout_batch_hash: payoutBatchHash,

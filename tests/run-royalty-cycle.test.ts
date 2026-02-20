@@ -569,7 +569,7 @@ describe("runRoyaltyCycle", () => {
     expect(executePayouts).toHaveBeenCalledTimes(1);
     const executeInput = executePayouts.mock.calls[0]?.[0];
     expect(executeInput?.idempotency_key).toBe(
-      `execute_payouts:2026-02:${approvalHash}`
+      `execute_payouts:2026-02:${firstRun.persistence.record_id}`
     );
     expect(secondRun.notes).toContain("approval_decision=approved");
     expect(secondRun.notes).toContain("approval_reviewer=fin.reviewer");
@@ -594,6 +594,96 @@ describe("runRoyaltyCycle", () => {
           event.payload.reason === "already_executed"
       )
     ).toBe(true);
+  });
+
+  it("does not re-execute when payout destination changes for the same persisted allocation record", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha_v1",
+      },
+    });
+
+    const executePayouts = vi.fn((input: ExecutePayoutsInput) => ({
+      executed_count: input.payouts.length,
+      results: input.payouts,
+    }));
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 500,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      approvePayoutBatch: () => ({ approved: true }),
+      executePayouts,
+    };
+
+    const firstRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(firstRun.status).toBe("completed");
+    if (firstRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(firstRun.execution.status).toBe("executed");
+    expect(executePayouts).toHaveBeenCalledTimes(1);
+
+    // Simulate restart where in-memory claim state is lost.
+    clearInMemoryRunRoyaltyCycleExecutionClaims();
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha_v2",
+      },
+    });
+
+    const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(secondRun.status).toBe("completed");
+    if (secondRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(secondRun.execution).toEqual({
+      status: "skipped",
+      reason: "already_executed",
+      executed_count: 0,
+    });
+    expect(executePayouts).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed when allocation persistence reports a duplicate conflict", async () => {
