@@ -220,6 +220,38 @@ export type {
 } from "./royalty-cycle-audit.js";
 
 export {
+  GetRoyaltyObservabilityDashboardInputSchema,
+  RecordRoyaltyObservabilityInputSchema,
+  RecordRoyaltyObservabilityOutputSchema,
+  RoyaltyObservabilityAlertSchema,
+  RoyaltyObservabilityDashboardSchema,
+  RoyaltyObservabilitySampleSchema,
+  RoyaltyObservabilityThresholdsSchema,
+  RoyaltyRunAggregationMetricsSchema,
+  RoyaltyRunAnomalyMetricsSchema,
+  RoyaltyRunPayoutMetricsSchema,
+  RoyaltyRunTelemetryMetricsSchema,
+  clearInMemoryRoyaltyObservabilitySamples,
+  getInMemoryRoyaltyObservabilitySamples,
+  getRoyaltyObservabilityDashboard,
+  recordRoyaltyObservabilitySample,
+} from "./royalty-observability.js";
+export type {
+  GetRoyaltyObservabilityDashboardInput,
+  RecordRoyaltyObservabilityInput,
+  RecordRoyaltyObservabilityOutput,
+  RoyaltyObservabilityAlert,
+  RoyaltyObservabilityDashboard,
+  RoyaltyObservabilitySample,
+  RoyaltyObservabilityStore,
+  RoyaltyObservabilityThresholds,
+  RoyaltyRunAggregationMetrics,
+  RoyaltyRunAnomalyMetrics,
+  RoyaltyRunPayoutMetrics,
+  RoyaltyRunTelemetryMetrics,
+} from "./royalty-observability.js";
+
+export {
   PayoutBatchAdjustmentSchema,
   PayoutBatchApprovalDecisionSchema,
   PayoutBatchApprovalRecordSchema,

@@ -40,8 +40,13 @@ import {
 } from "../tools/persist-allocations.js";
 import {
   getInMemoryLibraryUsageIngestionEvents,
+  type LibraryUsageIngestionMetrics,
   type LibraryUsageEventStore,
 } from "../tools/library-usage-ingestion.js";
+import {
+  recordRoyaltyObservabilitySample,
+  type RoyaltyObservabilityStore,
+} from "../tools/royalty-observability.js";
 import { type LibraryIdResolver } from "../tools/library-registry.js";
 import { type AuthorizationRuntimeEnvironment } from "../tools/authz.js";
 import { type ToolRiskLevel } from "../tools/guardrails.js";
@@ -96,6 +101,7 @@ export type RunRoyaltyCycleOptions = {
   eventStore?: LibraryUsageEventStore;
   allocationStore?: AllocationPersistenceStore;
   auditStore?: RoyaltyCycleAuditStore;
+  observabilityStore?: RoyaltyObservabilityStore;
   resolveLibraryId?: LibraryIdResolver;
   resolveMaintainerId?: (libraryId: string) => Promise<string> | string;
   resolveMaintainer?:
@@ -120,6 +126,10 @@ export type RunRoyaltyCycleOptions = {
     persistence: PersistAllocationsOutput;
   }) => Promise<PayoutBatchApprovalRecord | null> | PayoutBatchApprovalRecord | null;
   executePayouts?: (input: ExecutePayoutsInput) => Promise<ExecutePayoutsResult> | ExecutePayoutsResult;
+  getTelemetryIngestionMetrics?:
+    () =>
+      | Promise<LibraryUsageIngestionMetrics>
+      | LibraryUsageIngestionMetrics;
   now?: () => number;
   principal?: unknown;
   runtimeEnvironment?: AuthorizationRuntimeEnvironment;
@@ -267,6 +277,23 @@ export async function runRoyaltyCycle(
     .digest("hex")
     .slice(0, 24)}`;
   notes.push(`run_id=${runId}`);
+  const telemetryIngestionMetrics = options.getTelemetryIngestionMetrics
+    ? await options.getTelemetryIngestionMetrics()
+    : undefined;
+  const periodEndMs = Date.parse(parsedInput.period_end);
+  const aggregationLagMs = Number.isFinite(periodEndMs)
+    ? Math.max(0, runEpochMs - periodEndMs)
+    : 0;
+  const telemetryIngestionLagMs = (() => {
+    if (!telemetryIngestionMetrics?.last_ingested_at) {
+      return null;
+    }
+    const lastIngestedAtMs = Date.parse(telemetryIngestionMetrics.last_ingested_at);
+    if (!Number.isFinite(lastIngestedAtMs)) {
+      return null;
+    }
+    return Math.max(0, runEpochMs - lastIngestedAtMs);
+  })();
 
   const appendAuditEvent = async (
     eventType:
@@ -299,6 +326,78 @@ export async function runRoyaltyCycle(
         maxAllowedRisk: mediumRisk,
       }
     );
+  };
+
+  const appendObservability = async (input: {
+    pagesFetched: number;
+    libraryCount: number;
+    anomalyDetected: boolean;
+    anomalyCodes: string[];
+    payoutOutcome: "executed" | "skipped";
+    candidatePayoutCount: number;
+    executedCount: number;
+    skipReason?: string;
+  }) => {
+    try {
+      await recordRoyaltyObservabilitySample(
+        {
+          period: parsedInput.period,
+          run_id: runId,
+          ...(telemetryIngestionMetrics === undefined
+            ? {}
+            : {
+                telemetry: {
+                  events_received: telemetryIngestionMetrics.events_received,
+                  events_persisted: telemetryIngestionMetrics.events_persisted,
+                  events_failed: telemetryIngestionMetrics.events_failed,
+                  ...(telemetryIngestionMetrics.last_ingested_at === undefined
+                    ? {}
+                    : {
+                        last_ingested_at:
+                          telemetryIngestionMetrics.last_ingested_at,
+                      }),
+                  ...(telemetryIngestionLagMs === null
+                    ? {}
+                    : { ingestion_lag_ms: telemetryIngestionLagMs }),
+                },
+              }),
+          aggregation: {
+            pages_fetched: input.pagesFetched,
+            library_count: input.libraryCount,
+            aggregation_lag_ms: aggregationLagMs,
+          },
+          anomaly: {
+            detected: input.anomalyDetected,
+            codes: input.anomalyCodes,
+          },
+          payout: {
+            outcome: input.payoutOutcome,
+            candidate_payout_count: input.candidatePayoutCount,
+            executed_count: input.executedCount,
+            ...(input.skipReason === undefined
+              ? {}
+              : { skip_reason: input.skipReason }),
+          },
+        },
+        {
+          ...(options.observabilityStore === undefined
+            ? {}
+            : { store: options.observabilityStore }),
+          ...(options.now === undefined ? {} : { now: options.now }),
+          ...(options.principal === undefined ? {} : { principal: options.principal }),
+          ...(options.runtimeEnvironment === undefined
+            ? {}
+            : { runtimeEnvironment: options.runtimeEnvironment }),
+          ...(options.allowTestAuthBypass === undefined
+            ? {}
+            : { allowTestAuthBypass: options.allowTestAuthBypass }),
+          maxAllowedRisk: mediumRisk,
+        }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notes.push(`observability_record_error=${message}`);
+    }
   };
 
   const usageStats: AggregatedLibraryUsage[] = [];
@@ -340,6 +439,16 @@ export async function runRoyaltyCycle(
     notes.push("no usage aggregates found for requested period");
     await appendAuditEvent("cycle_no_usage", {
       pages_fetched: pagesFetched,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: 0,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: 0,
+      executedCount: 0,
+      skipReason: "no_usage",
     });
     return {
       status: "no_usage",
@@ -466,6 +575,19 @@ export async function runRoyaltyCycle(
       reason: anomalyResult.reason ?? "payout_anomaly_detected",
       candidate_payout_count: payoutBatch.payouts.length,
     });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: true,
+      anomalyCodes:
+        Array.isArray(anomalyDetails.codes) && anomalyDetails.codes.length > 0
+          ? anomalyDetails.codes
+          : [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutBatch.payouts.length,
+      executedCount: 0,
+      skipReason: anomalyResult.reason ?? "payout_anomaly_detected",
+    });
     return {
       status: "completed",
       period: parsedInput.period,
@@ -515,6 +637,16 @@ export async function runRoyaltyCycle(
         reason: "approval_required",
         candidate_payout_count: payoutBatch.payouts.length,
       });
+      await appendObservability({
+        pagesFetched,
+        libraryCount: usageStats.length,
+        anomalyDetected: false,
+        anomalyCodes: [],
+        payoutOutcome: "skipped",
+        candidatePayoutCount: payoutBatch.payouts.length,
+        executedCount: 0,
+        skipReason: "approval_required",
+      });
       return {
         status: "completed",
         period: parsedInput.period,
@@ -552,6 +684,16 @@ export async function runRoyaltyCycle(
         reason: storedApproval.reason || "payout_batch_denied",
         candidate_payout_count: payoutBatch.payouts.length,
       });
+      await appendObservability({
+        pagesFetched,
+        libraryCount: usageStats.length,
+        anomalyDetected: false,
+        anomalyCodes: [],
+        payoutOutcome: "skipped",
+        candidatePayoutCount: payoutBatch.payouts.length,
+        executedCount: 0,
+        skipReason: storedApproval.reason || "payout_batch_denied",
+      });
       return {
         status: "completed",
         period: parsedInput.period,
@@ -582,6 +724,16 @@ export async function runRoyaltyCycle(
         await appendAuditEvent("payout_execution_skipped", {
           reason: adjustmentResult.reason,
           candidate_payout_count: payoutBatch.payouts.length,
+        });
+        await appendObservability({
+          pagesFetched,
+          libraryCount: usageStats.length,
+          anomalyDetected: false,
+          anomalyCodes: [],
+          payoutOutcome: "skipped",
+          candidatePayoutCount: payoutBatch.payouts.length,
+          executedCount: 0,
+          skipReason: adjustmentResult.reason,
         });
         return {
           status: "completed",
@@ -625,6 +777,16 @@ export async function runRoyaltyCycle(
       reason: approval.reason ?? "approval_required",
       candidate_payout_count: payoutExecutionCandidates.length,
     });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutExecutionCandidates.length,
+      executedCount: 0,
+      skipReason: approval.reason ?? "approval_required",
+    });
     return {
       status: "completed",
       period: parsedInput.period,
@@ -651,6 +813,16 @@ export async function runRoyaltyCycle(
       reason: "execute_payouts_not_configured",
       candidate_payout_count: payoutExecutionCandidates.length,
     });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutExecutionCandidates.length,
+      executedCount: 0,
+      skipReason: "execute_payouts_not_configured",
+    });
     return {
       status: "completed",
       period: parsedInput.period,
@@ -676,6 +848,16 @@ export async function runRoyaltyCycle(
     await appendAuditEvent("payout_execution_skipped", {
       reason: "no_eligible_payouts",
       candidate_payout_count: 0,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: 0,
+      executedCount: 0,
+      skipReason: "no_eligible_payouts",
     });
     return {
       status: "completed",
@@ -706,6 +888,15 @@ export async function runRoyaltyCycle(
   await appendAuditEvent("payout_execution_executed", {
     candidate_payout_count: payoutExecutionCandidates.length,
     executed_count: executionResult.executed_count ?? payoutExecutionCandidates.length,
+  });
+  await appendObservability({
+    pagesFetched,
+    libraryCount: usageStats.length,
+    anomalyDetected: false,
+    anomalyCodes: [],
+    payoutOutcome: "executed",
+    candidatePayoutCount: payoutExecutionCandidates.length,
+    executedCount: executionResult.executed_count ?? payoutExecutionCandidates.length,
   });
   return {
     status: "completed",

@@ -35,6 +35,8 @@ const INTERNAL_TOOL_NAMES = new Set<GuardrailedToolName>([
   "persist_allocations",
   "create_payout_batch",
   "append_royalty_cycle_audit",
+  "record_royalty_observability",
+  "get_royalty_observability_dashboard",
   "record_payout_batch_approval",
   "execute_payouts",
 ]);
@@ -47,6 +49,8 @@ const AUTHORIZED_ROLES_BY_TOOL: Record<GuardrailedToolName, ToolPrincipalRole[]>
   persist_allocations: ["manager", "admin", "service"],
   create_payout_batch: ["manager", "admin", "service"],
   append_royalty_cycle_audit: ["manager", "admin", "service"],
+  record_royalty_observability: ["analyst", "manager", "admin", "service"],
+  get_royalty_observability_dashboard: ["analyst", "manager", "admin", "service"],
   record_payout_batch_approval: ["manager", "admin", "service"],
   execute_payouts: ["admin", "service"],
 };

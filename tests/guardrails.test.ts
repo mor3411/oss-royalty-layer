@@ -12,6 +12,8 @@ describe("tool guardrails", () => {
     expect(getToolRiskLevel("log_library_usage")).toBe("low");
     expect(getToolRiskLevel("aggregate_usage_for_period")).toBe("medium");
     expect(getToolRiskLevel("append_royalty_cycle_audit")).toBe("medium");
+    expect(getToolRiskLevel("record_royalty_observability")).toBe("medium");
+    expect(getToolRiskLevel("get_royalty_observability_dashboard")).toBe("medium");
     expect(getToolRiskLevel("record_payout_batch_approval")).toBe("high");
     expect(getToolRiskLevel("execute_payouts")).toBe("high");
   });

@@ -26,6 +26,12 @@ export {
   verifyRoyaltyCycleAuditTrail,
 } from "./royalty-cycle-audit.js";
 export {
+  clearInMemoryRoyaltyObservabilitySamples,
+  getInMemoryRoyaltyObservabilitySamples,
+  getRoyaltyObservabilityDashboard,
+  recordRoyaltyObservabilitySample,
+} from "./royalty-observability.js";
+export {
   clearInMemoryPayoutBatchApprovals,
   getInMemoryPayoutBatchApproval,
   getInMemoryPayoutBatchApprovals,

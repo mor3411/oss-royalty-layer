@@ -11,6 +11,8 @@ export const GuardrailedToolNameSchema = z.enum([
   "persist_allocations",
   "create_payout_batch",
   "append_royalty_cycle_audit",
+  "record_royalty_observability",
+  "get_royalty_observability_dashboard",
   "record_payout_batch_approval",
   "execute_payouts",
 ]);
@@ -28,6 +30,8 @@ const TOOL_RISK_BY_NAME: Record<GuardrailedToolName, ToolRiskLevel> = {
   persist_allocations: "medium",
   create_payout_batch: "high",
   append_royalty_cycle_audit: "medium",
+  record_royalty_observability: "medium",
+  get_royalty_observability_dashboard: "medium",
   record_payout_batch_approval: "high",
   execute_payouts: "high",
 };
@@ -160,6 +164,14 @@ const AppendRoyaltyCycleAuditOutputSanitySchema = z.object({
   observed_at: z.string().datetime(),
 });
 
+const RecordRoyaltyObservabilityOutputSanitySchema = z.object({
+  status: z.literal("recorded"),
+  sample_id: z.string().min(1),
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  run_id: z.string().min(1),
+  recorded_at: z.string().datetime(),
+});
+
 function estimatePayloadBytes(payload: unknown): number {
   const serialized = JSON.stringify(payload);
   return Buffer.byteLength(serialized, "utf8");
@@ -277,5 +289,10 @@ export function assertToolOutputSanity(
 
   if (toolName === "append_royalty_cycle_audit") {
     AppendRoyaltyCycleAuditOutputSanitySchema.parse(output);
+    return;
+  }
+
+  if (toolName === "record_royalty_observability") {
+    RecordRoyaltyObservabilityOutputSanitySchema.parse(output);
   }
 }

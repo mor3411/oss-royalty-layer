@@ -14,7 +14,9 @@ import {
   clearInMemoryPayoutBatchApprovals,
   clearInMemoryPersistedAllocations,
   clearInMemoryRoyaltyCycleAudits,
+  clearInMemoryRoyaltyObservabilitySamples,
   getInMemoryRoyaltyCycleAuditsByPeriod,
+  getInMemoryRoyaltyObservabilitySamples,
   getInMemoryPersistedAllocations,
   recordPayoutBatchApproval,
   upsertInMemoryMaintainerProfile,
@@ -32,6 +34,7 @@ describe("runRoyaltyCycle", () => {
     clearInMemoryMaintainerProfiles();
     clearInMemoryPayoutBatchApprovals();
     clearInMemoryRoyaltyCycleAudits();
+    clearInMemoryRoyaltyObservabilitySamples();
   });
 
   it("runs aggregate -> allocate -> persist -> payout -> execute", async () => {
@@ -147,6 +150,11 @@ describe("runRoyaltyCycle", () => {
       true
     );
     expect(audits.some((event) => event.event_type === "payout_execution_executed")).toBe(true);
+
+    const observabilitySamples = getInMemoryRoyaltyObservabilitySamples("2026-02");
+    expect(observabilitySamples).toHaveLength(1);
+    expect(observabilitySamples[0]?.payout.outcome).toBe("executed");
+    expect(observabilitySamples[0]?.aggregation.library_count).toBe(2);
   });
 
   it("skips execute stage when approval is denied", async () => {
