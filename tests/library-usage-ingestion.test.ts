@@ -1,0 +1,181 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  clearInMemoryLibraryUsageIngestionEvents,
+  createLibraryUsageIngestionPipeline,
+  createNdjsonLibraryUsageEventStore,
+} from "../src/tools/library-usage-ingestion.js";
+
+const sampleEvent = {
+  session_id: "a".repeat(64),
+  source: "api" as const,
+  ts: "2026-02-19T22:00:00.000Z",
+  library: {
+    name: "zod",
+    ecosystem: "npm" as const,
+    version: "3.23.8",
+    calls: 2,
+  },
+};
+
+describe("library usage ingestion pipeline", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    clearInMemoryLibraryUsageIngestionEvents();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  it("persists events to in-memory store and exposes metrics", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline({
+      now: () => Date.parse("2026-02-19T22:01:00.000Z"),
+    });
+
+    await pipeline.enqueueEvent(sampleEvent);
+
+    const metrics = pipeline.getMetrics();
+    const events = await pipeline.readIngestedEvents();
+
+    expect(metrics).toMatchObject({
+      events_received: 1,
+      events_persisted: 1,
+      events_failed: 0,
+      last_ingested_at: "2026-02-19T22:01:00.000Z",
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event).toEqual(sampleEvent);
+    expect(events[0]?.event_id).toMatch(/^evt_[a-f0-9]{24}$/);
+  });
+
+  it("stores events durably in NDJSON event log", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+    const store = createNdjsonLibraryUsageEventStore(filePath);
+    const pipeline = createLibraryUsageIngestionPipeline({
+      eventStore: store,
+      now: () => Date.parse("2026-02-19T22:02:00.000Z"),
+    });
+
+    await pipeline.enqueueEvent(sampleEvent);
+
+    const restoredStore = createNdjsonLibraryUsageEventStore(filePath);
+    const restored = await restoredStore.readAll();
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.event).toEqual(sampleEvent);
+    expect(restored[0]?.ingested_at).toBe("2026-02-19T22:02:00.000Z");
+  });
+
+  it("counts schema parse failures in ingestion metrics", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+
+    await expect(
+      pipeline.enqueueEvent({
+        session_id: "a".repeat(64),
+        source: "api",
+        ts: "2026-02-19T22:00:00.000Z",
+        library: {
+          name: "zod",
+          ecosystem: "npm",
+          version: "3.23.8",
+          calls: -1,
+        },
+      })
+    ).rejects.toThrowError();
+
+    expect(pipeline.getMetrics()).toMatchObject({
+      events_received: 1,
+      events_persisted: 0,
+      events_failed: 1,
+    });
+  });
+
+  it("skips malformed NDJSON lines in tolerant read mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+    const invalidLineSpy = vi.fn();
+
+    const validEnvelope = {
+      event_id: "evt_123",
+      ingested_at: "2026-02-19T22:02:00.000Z",
+      event: sampleEvent,
+    };
+    await writeFile(filePath, `${JSON.stringify(validEnvelope)}\n{"bad-json":\n`, "utf8");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath, {
+      onInvalidLine: invalidLineSpy,
+      strictRead: false,
+    });
+    const restored = await store.readAll();
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.event_id).toBe("evt_123");
+    expect(invalidLineSpy).toHaveBeenCalledTimes(1);
+    expect(invalidLineSpy).toHaveBeenCalledWith(2, expect.any(String));
+  });
+
+  it("defaults to strict read mode for malformed NDJSON lines", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+
+    await writeFile(filePath, `{"bad-json":\n`, "utf8");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath);
+    await expect(store.readAll()).rejects.toThrowError("invalid envelope at line 1");
+  });
+
+  it("throws on malformed NDJSON lines in strict read mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+
+    await writeFile(filePath, `{"bad-json":\n`, "utf8");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath, {
+      strictRead: true,
+    });
+
+    await expect(store.readAll()).rejects.toThrowError("invalid envelope at line 1");
+  });
+
+  it("rotates NDJSON event logs and reads retained history in order", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath, {
+      maxBytes: 1,
+      maxFiles: 3,
+    });
+    const pipeline = createLibraryUsageIngestionPipeline({
+      eventStore: store,
+      eventIdGenerator: (_event, ingestIndex) => `evt_${ingestIndex}`,
+      now: () => Date.parse("2026-02-19T22:03:00.000Z"),
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await pipeline.enqueueEvent({
+        ...sampleEvent,
+        library: {
+          ...sampleEvent.library,
+          name: `pkg-${index}`,
+        },
+      });
+    }
+
+    const restored = await createNdjsonLibraryUsageEventStore(filePath, {
+      maxFiles: 3,
+    }).readAll();
+    expect(restored.map((envelope) => envelope.event_id)).toEqual([
+      "evt_3",
+      "evt_4",
+      "evt_5",
+    ]);
+  });
+});
