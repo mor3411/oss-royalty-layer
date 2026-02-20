@@ -17,6 +17,7 @@ import {
   createPayoutBatch,
   type CreatePayoutBatchOutput,
   type MaintainerPayoutProfile,
+  PayoutBatchEntrySchema,
   type PayoutBatchEntry,
 } from "../tools/create-payout-batch.js";
 import {
@@ -48,8 +49,11 @@ import {
   type RoyaltyObservabilityStore,
 } from "../tools/royalty-observability.js";
 import { type LibraryIdResolver } from "../tools/library-registry.js";
-import { type AuthorizationRuntimeEnvironment } from "../tools/authz.js";
-import { type ToolRiskLevel } from "../tools/guardrails.js";
+import {
+  assertToolAuthorized,
+  type AuthorizationRuntimeEnvironment,
+} from "../tools/authz.js";
+import { assertToolRiskAllowed, type ToolRiskLevel } from "../tools/guardrails.js";
 
 const RunRoyaltyCycleInputSchema = z
   .object({
@@ -252,6 +256,65 @@ function applyApprovalAdjustments(
       left.maintainer_id.localeCompare(right.maintainer_id)
     ),
   };
+}
+
+const CallbackAdjustedPayoutsSchema = z.array(PayoutBatchEntrySchema).min(1);
+
+function applyCallbackAdjustedPayouts(
+  payouts: PayoutBatchEntry[],
+  adjustedPayouts: unknown
+): { status: "ok"; payouts: PayoutBatchEntry[] } | { status: "invalid"; reason: string } {
+  const parsedAdjustedPayouts = CallbackAdjustedPayoutsSchema.safeParse(adjustedPayouts);
+  if (!parsedAdjustedPayouts.success) {
+    return {
+      status: "invalid",
+      reason: "approval callback returned invalid adjusted payouts",
+    };
+  }
+
+  const payoutsByMaintainer = new Map<string, PayoutBatchEntry>();
+  for (const payout of payouts) {
+    payoutsByMaintainer.set(payout.maintainer_id, payout);
+  }
+
+  const adjustments: PayoutBatchAdjustment[] = [];
+  for (const adjusted of parsedAdjustedPayouts.data) {
+    const basePayout = payoutsByMaintainer.get(adjusted.maintainer_id);
+    if (!basePayout) {
+      return {
+        status: "invalid",
+        reason: `approval callback included unknown maintainer ${adjusted.maintainer_id}`,
+      };
+    }
+    if (adjusted.currency !== basePayout.currency) {
+      return {
+        status: "invalid",
+        reason: `approval callback adjusted payout for maintainer ${adjusted.maintainer_id} cannot override currency`,
+      };
+    }
+    if (adjusted.allocation_count !== basePayout.allocation_count) {
+      return {
+        status: "invalid",
+        reason: `approval callback adjusted payout for maintainer ${adjusted.maintainer_id} cannot override allocation_count`,
+      };
+    }
+    if (
+      adjusted.payout_account.provider !== basePayout.payout_account.provider ||
+      adjusted.payout_account.account_id !== basePayout.payout_account.account_id
+    ) {
+      return {
+        status: "invalid",
+        reason: `approval callback adjusted payout for maintainer ${adjusted.maintainer_id} cannot override payout account`,
+      };
+    }
+
+    adjustments.push({
+      maintainer_id: adjusted.maintainer_id,
+      amount_minor: adjusted.amount_minor,
+    });
+  }
+
+  return applyApprovalAdjustments(payouts, adjustments);
 }
 
 export async function runRoyaltyCycle(
@@ -520,7 +583,32 @@ export async function runRoyaltyCycle(
     record_id: persistence.record_id,
     persistence_audit_event_id: persistence.audit_event_id,
     pool_amount_minor: allocation.pool_amount_minor,
+    ...(persistence.status === "already_exists"
+      ? { duplicate_conflict: persistence.duplicate_conflict }
+      : {}),
   });
+  if (persistence.status === "already_exists" && persistence.duplicate_conflict) {
+    const conflictReason = "allocation_conflict_requires_review";
+    notes.push(`persistence_conflict=${persistence.record_id}`);
+    await appendAuditEvent("payout_execution_skipped", {
+      reason: conflictReason,
+      candidate_payout_count: 0,
+      record_id: persistence.record_id,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: 0,
+      executedCount: 0,
+      skipReason: conflictReason,
+    });
+    throw new Error(
+      `allocation persistence conflict detected for period ${parsedInput.period}; manual review required`
+    );
+  }
 
   const payoutBatch = await createPayoutBatch(
     {
@@ -773,7 +861,46 @@ export async function runRoyaltyCycle(
       adjustments_count: approval.adjusted_payouts?.length ?? 0,
     });
     if (approval.adjusted_payouts && approval.adjusted_payouts.length > 0) {
-      payoutExecutionCandidates = approval.adjusted_payouts;
+      const callbackAdjustmentResult = applyCallbackAdjustedPayouts(
+        payoutBatch.payouts,
+        approval.adjusted_payouts
+      );
+      if (callbackAdjustmentResult.status !== "ok") {
+        await appendAuditEvent("payout_execution_skipped", {
+          reason: callbackAdjustmentResult.reason,
+          candidate_payout_count: payoutBatch.payouts.length,
+        });
+        await appendObservability({
+          pagesFetched,
+          libraryCount: usageStats.length,
+          anomalyDetected: false,
+          anomalyCodes: [],
+          payoutOutcome: "skipped",
+          candidatePayoutCount: payoutBatch.payouts.length,
+          executedCount: 0,
+          skipReason: callbackAdjustmentResult.reason,
+        });
+        return {
+          status: "completed",
+          period: parsedInput.period,
+          pool_amount_minor: parsedInput.pool_amount_minor,
+          aggregation: {
+            pages_fetched: pagesFetched,
+            library_count: usageStats.length,
+            usage_stats: usageStats,
+          },
+          allocation,
+          persistence,
+          payout_batch: payoutBatch,
+          execution: {
+            status: "skipped",
+            reason: callbackAdjustmentResult.reason,
+            executed_count: 0,
+          },
+          notes,
+        };
+      }
+      payoutExecutionCandidates = callbackAdjustmentResult.payouts;
       notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
     }
   }
@@ -885,6 +1012,21 @@ export async function runRoyaltyCycle(
       notes,
     };
   }
+
+  assertToolAuthorized({
+    toolName: "execute_payouts",
+    ...(options.principal === undefined ? {} : { principal: options.principal }),
+    ...(options.runtimeEnvironment === undefined
+      ? {}
+      : { runtimeEnvironment: options.runtimeEnvironment }),
+    ...(options.allowTestAuthBypass === undefined
+      ? {}
+      : { allowTestBypass: options.allowTestAuthBypass }),
+  });
+  assertToolRiskAllowed({
+    toolName: "execute_payouts",
+    maxAllowedRisk: payoutRisk,
+  });
 
   const executionResult = await options.executePayouts({
     period: parsedInput.period,
