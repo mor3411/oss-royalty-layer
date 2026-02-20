@@ -50,11 +50,22 @@ describe("tool authorization", () => {
     expect(principal.role).toBe("service");
   });
 
-  it("allows test bypass by default", () => {
+  it("allows explicit test bypass for test runtime", () => {
     const principal = assertToolAuthorized({
       toolName: "aggregate_usage_for_period",
       runtimeEnvironment: "test",
+      allowTestBypass: true,
     });
     expect(principal.principal_id).toBe("test-auth-bypass");
+  });
+
+  it("rejects test bypass when explicitly disabled", () => {
+    expect(() =>
+      assertToolAuthorized({
+        toolName: "aggregate_usage_for_period",
+        runtimeEnvironment: "test",
+        allowTestBypass: false,
+      })
+    ).toThrowError("authorization required");
   });
 });

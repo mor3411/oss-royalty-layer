@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { persistAllocations } from "../src/tools/persist-allocations.js";
+import {
+  persistAllocations,
+  type AllocationPersistenceStore,
+  type PersistedAllocationRecord,
+} from "../src/tools/persist-allocations.js";
 import {
   clearInMemoryPersistedAllocations,
   getInMemoryAllocationPersistenceAudits,
@@ -97,6 +101,48 @@ describe("persistAllocations", () => {
     expect(audits).toHaveLength(2);
     expect(audits[1]?.payload_conflict).toBe(true);
     expect(audits[1]?.incoming_payload_hash).not.toBe(audits[1]?.existing_payload_hash);
+  });
+
+  it("returns already_exists under concurrent duplicate writes", async () => {
+    const records = new Map<string, PersistedAllocationRecord>();
+    const audits: Array<{ action: string }> = [];
+    let readCount = 0;
+    let releaseConcurrentReads: (() => void) | undefined;
+    const concurrentReadBarrier = new Promise<void>((resolve) => {
+      releaseConcurrentReads = resolve;
+    });
+
+    const store: AllocationPersistenceStore = {
+      async readByPeriod(period: string) {
+        readCount += 1;
+        if (readCount <= 2) {
+          if (readCount === 2) {
+            releaseConcurrentReads?.();
+          }
+          await concurrentReadBarrier;
+        }
+        return records.get(period) ?? null;
+      },
+      appendRecord(record) {
+        if (records.has(record.period)) {
+          throw new Error(`allocation record for period ${record.period} already exists`);
+        }
+        records.set(record.period, record);
+      },
+      appendAudit(audit) {
+        audits.push({ action: audit.action });
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      persistAllocations(BASE_INPUT, { store }),
+      persistAllocations(BASE_INPUT, { store }),
+    ]);
+
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual(["already_exists", "ok"]);
+    expect(audits.filter((audit) => audit.action === "created")).toHaveLength(1);
+    expect(audits.filter((audit) => audit.action === "duplicate_ignored")).toHaveLength(1);
   });
 
   it("rejects invalid allocation constraints before persisting", async () => {

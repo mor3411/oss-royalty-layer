@@ -914,6 +914,149 @@ describe("runRoyaltyCycle", () => {
     expect(secondRun.notes).toContain("approval_decision=adjusted");
   });
 
+  it("keeps unadjusted payouts when stored adjustments target a subset", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 8,
+      },
+    });
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.two,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "beta",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 8,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+    const betaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "beta",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.beta",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_beta",
+      },
+    });
+
+    const executePayouts = vi.fn((input: ExecutePayoutsInput) => ({
+      executed_count: input.payouts.length,
+      results: input.payouts,
+    }));
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 1_000,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) => {
+        if (libraryId === alphaLibraryId) {
+          return "mnt.alpha";
+        }
+        if (libraryId === betaLibraryId) {
+          return "mnt.beta";
+        }
+        return "mnt.unknown";
+      },
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      executePayouts,
+    };
+
+    const firstRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    if (firstRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(firstRun.payout_batch.payouts).toHaveLength(2);
+    const originalAmountsByMaintainer = new Map(
+      firstRun.payout_batch.payouts.map((payout) => [
+        payout.maintainer_id,
+        payout.amount_minor,
+      ])
+    );
+
+    const alphaOriginal = originalAmountsByMaintainer.get("mnt.alpha");
+    const betaOriginal = originalAmountsByMaintainer.get("mnt.beta");
+    if (alphaOriginal === undefined || betaOriginal === undefined) {
+      throw new Error("expected alpha and beta payouts");
+    }
+    const alphaAdjusted = Math.max(1, alphaOriginal - 100);
+
+    const approvalHashNote = firstRun.notes.find((note) =>
+      note.startsWith("approval_hash=")
+    );
+    const approvalHash = approvalHashNote?.slice("approval_hash=".length);
+    if (!approvalHash) {
+      throw new Error("expected approval hash note");
+    }
+
+    await recordPayoutBatchApproval({
+      period: "2026-02",
+      payout_batch_hash: approvalHash,
+      decision: "adjusted",
+      reviewer_id: "fin.adjuster",
+      reason: "reduce alpha payout",
+      adjustments: [
+        {
+          maintainer_id: "mnt.alpha",
+          amount_minor: alphaAdjusted,
+        },
+      ],
+    });
+
+    const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    if (secondRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(secondRun.execution.status).toBe("executed");
+    expect(executePayouts).toHaveBeenCalledTimes(1);
+
+    const executeInput = executePayouts.mock.calls[0]?.[0];
+    const executedAmountsByMaintainer = new Map(
+      executeInput?.payouts.map((payout) => [payout.maintainer_id, payout.amount_minor])
+    );
+    expect(executeInput?.payouts).toHaveLength(2);
+    expect(executedAmountsByMaintainer.get("mnt.alpha")).toBe(alphaAdjusted);
+    expect(executedAmountsByMaintainer.get("mnt.beta")).toBe(betaOriginal);
+  });
+
   it("skips execution when callback adjustments alter payout destination data", async () => {
     const pipeline = createLibraryUsageIngestionPipeline();
     const registry = createInMemoryLibraryRegistry();

@@ -334,8 +334,9 @@ export async function persistAllocations(
   const auditEventIdGenerator =
     options.auditEventIdGenerator ?? defaultAuditEventIdGenerator;
 
-  const existingRecord = await store.readByPeriod(parsedInput.period);
-  if (existingRecord) {
+  const buildAlreadyExistsOutput = async (
+    existingRecord: PersistedAllocationRecord
+  ): Promise<PersistAllocationsOutput> => {
     const payloadConflict = existingRecord.payload_hash !== payloadHash;
     const auditEventId = auditEventIdGenerator(
       "duplicate_ignored",
@@ -365,6 +366,11 @@ export async function persistAllocations(
     };
     assertToolOutputSanity("persist_allocations", output);
     return output;
+  };
+
+  const existingRecord = await store.readByPeriod(parsedInput.period);
+  if (existingRecord) {
+    return buildAlreadyExistsOutput(existingRecord);
   }
 
   const recordId = recordIdGenerator(parsedInput.period, payloadHash, nowMs);
@@ -378,7 +384,18 @@ export async function persistAllocations(
     payload_hash: payloadHash,
     persisted_at: observedAt,
   };
-  await store.appendRecord(record);
+  try {
+    await store.appendRecord(record);
+  } catch (error) {
+    // A concurrent writer can win after our readByPeriod check. If the record
+    // now exists, treat this as an idempotent duplicate instead of surfacing
+    // an internal write error to callers.
+    const concurrentRecord = await store.readByPeriod(parsedInput.period);
+    if (concurrentRecord) {
+      return buildAlreadyExistsOutput(concurrentRecord);
+    }
+    throw error;
+  }
 
   const auditEventId = auditEventIdGenerator("created", parsedInput.period, payloadHash, nowMs);
   await store.appendAudit({

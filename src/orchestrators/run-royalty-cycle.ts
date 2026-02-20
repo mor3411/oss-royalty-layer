@@ -273,8 +273,7 @@ function applyApprovalAdjustments(
   }
 
   const seenMaintainers = new Set<string>();
-  const adjustedPayouts: PayoutBatchEntry[] = [];
-  let adjustedTotal = 0;
+  const adjustmentAmountsByMaintainer = new Map<string, number>();
 
   for (const adjustment of adjustments) {
     if (seenMaintainers.has(adjustment.maintainer_id)) {
@@ -293,11 +292,24 @@ function applyApprovalAdjustments(
       };
     }
 
-    adjustedTotal += adjustment.amount_minor;
-    adjustedPayouts.push({
-      ...basePayout,
-      amount_minor: adjustment.amount_minor,
-    });
+    adjustmentAmountsByMaintainer.set(adjustment.maintainer_id, adjustment.amount_minor);
+  }
+
+  const adjustedPayouts = payouts.map((payout) => ({
+    ...payout,
+    amount_minor:
+      adjustmentAmountsByMaintainer.get(payout.maintainer_id) ?? payout.amount_minor,
+  }));
+  const adjustedTotal = adjustedPayouts.reduce(
+    (sum, payout) => sum + payout.amount_minor,
+    0
+  );
+
+  if (adjustedTotal <= 0) {
+    return {
+      status: "invalid",
+      reason: "adjusted payouts must include at least one positive transfer",
+    };
   }
 
   if (adjustedTotal > originalTotal) {
@@ -309,9 +321,7 @@ function applyApprovalAdjustments(
 
   return {
     status: "ok",
-    payouts: adjustedPayouts.sort((left, right) =>
-      left.maintainer_id.localeCompare(right.maintainer_id)
-    ),
+    payouts: adjustedPayouts,
   };
 }
 
@@ -704,6 +714,23 @@ export async function runRoyaltyCycle(
   const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${payoutBatchHash}`;
   const executionClaimStore =
     options.executionClaimStore ?? inMemoryPayoutExecutionClaimStore;
+  const buildCompletedOutput = (
+    execution: Extract<RunRoyaltyCycleOutput, { status: "completed" }>["execution"]
+  ): RunRoyaltyCycleOutput => ({
+    status: "completed",
+    period: parsedInput.period,
+    pool_amount_minor: parsedInput.pool_amount_minor,
+    aggregation: {
+      pages_fetched: pagesFetched,
+      library_count: usageStats.length,
+      usage_stats: usageStats,
+    },
+    allocation,
+    persistence,
+    payout_batch: payoutBatch,
+    execution,
+    notes,
+  });
 
   const anomalyResult = options.detectPayoutAnomalies
     ? await options.detectPayoutAnomalies({
@@ -746,25 +773,11 @@ export async function runRoyaltyCycle(
       executedCount: 0,
       skipReason: anomalyResult.reason ?? "payout_anomaly_detected",
     });
-    return {
-      status: "completed",
-      period: parsedInput.period,
-      pool_amount_minor: parsedInput.pool_amount_minor,
-      aggregation: {
-        pages_fetched: pagesFetched,
-        library_count: usageStats.length,
-        usage_stats: usageStats,
-      },
-      allocation,
-      persistence,
-      payout_batch: payoutBatch,
-      execution: {
-        status: "skipped",
-        reason: anomalyResult.reason ?? "payout_anomaly_detected",
-        executed_count: 0,
-      },
-      notes,
-    };
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: anomalyResult.reason ?? "payout_anomaly_detected",
+      executed_count: 0,
+    });
   }
 
   let payoutExecutionCandidates = payoutBatch.payouts;
@@ -805,25 +818,11 @@ export async function runRoyaltyCycle(
         executedCount: 0,
         skipReason: "approval_required",
       });
-      return {
-        status: "completed",
-        period: parsedInput.period,
-        pool_amount_minor: parsedInput.pool_amount_minor,
-        aggregation: {
-          pages_fetched: pagesFetched,
-          library_count: usageStats.length,
-          usage_stats: usageStats,
-        },
-        allocation,
-        persistence,
-        payout_batch: payoutBatch,
-        execution: {
-          status: "skipped",
-          reason: "approval_required",
-          executed_count: 0,
-        },
-        notes,
-      };
+      return buildCompletedOutput({
+        status: "skipped",
+        reason: "approval_required",
+        executed_count: 0,
+      });
     }
 
     notes.push(`approval_decision=${storedApproval.decision}`);
@@ -852,25 +851,11 @@ export async function runRoyaltyCycle(
         executedCount: 0,
         skipReason: storedApproval.reason || "payout_batch_denied",
       });
-      return {
-        status: "completed",
-        period: parsedInput.period,
-        pool_amount_minor: parsedInput.pool_amount_minor,
-        aggregation: {
-          pages_fetched: pagesFetched,
-          library_count: usageStats.length,
-          usage_stats: usageStats,
-        },
-        allocation,
-        persistence,
-        payout_batch: payoutBatch,
-        execution: {
-          status: "skipped",
-          reason: storedApproval.reason || "payout_batch_denied",
-          executed_count: 0,
-        },
-        notes,
-      };
+      return buildCompletedOutput({
+        status: "skipped",
+        reason: storedApproval.reason || "payout_batch_denied",
+        executed_count: 0,
+      });
     }
 
     if (storedApproval.decision === "adjusted") {
@@ -893,25 +878,11 @@ export async function runRoyaltyCycle(
           executedCount: 0,
           skipReason: adjustmentResult.reason,
         });
-        return {
-          status: "completed",
-          period: parsedInput.period,
-          pool_amount_minor: parsedInput.pool_amount_minor,
-          aggregation: {
-            pages_fetched: pagesFetched,
-            library_count: usageStats.length,
-            usage_stats: usageStats,
-          },
-          allocation,
-          persistence,
-          payout_batch: payoutBatch,
-          execution: {
-            status: "skipped",
-            reason: adjustmentResult.reason,
-            executed_count: 0,
-          },
-          notes,
-        };
+        return buildCompletedOutput({
+          status: "skipped",
+          reason: adjustmentResult.reason,
+          executed_count: 0,
+        });
       }
       payoutExecutionCandidates = adjustmentResult.payouts;
       notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
@@ -944,25 +915,11 @@ export async function runRoyaltyCycle(
           executedCount: 0,
           skipReason: callbackAdjustmentResult.reason,
         });
-        return {
-          status: "completed",
-          period: parsedInput.period,
-          pool_amount_minor: parsedInput.pool_amount_minor,
-          aggregation: {
-            pages_fetched: pagesFetched,
-            library_count: usageStats.length,
-            usage_stats: usageStats,
-          },
-          allocation,
-          persistence,
-          payout_batch: payoutBatch,
-          execution: {
-            status: "skipped",
-            reason: callbackAdjustmentResult.reason,
-            executed_count: 0,
-          },
-          notes,
-        };
+        return buildCompletedOutput({
+          status: "skipped",
+          reason: callbackAdjustmentResult.reason,
+          executed_count: 0,
+        });
       }
       payoutExecutionCandidates = callbackAdjustmentResult.payouts;
       notes.push(`approval_adjusted_payouts=${payoutExecutionCandidates.length}`);
@@ -984,25 +941,11 @@ export async function runRoyaltyCycle(
       executedCount: 0,
       skipReason: approval.reason ?? "approval_required",
     });
-    return {
-      status: "completed",
-      period: parsedInput.period,
-      pool_amount_minor: parsedInput.pool_amount_minor,
-      aggregation: {
-        pages_fetched: pagesFetched,
-        library_count: usageStats.length,
-        usage_stats: usageStats,
-      },
-      allocation,
-      persistence,
-      payout_batch: payoutBatch,
-      execution: {
-        status: "skipped",
-        reason: approval.reason ?? "approval_required",
-        executed_count: 0,
-      },
-      notes,
-    };
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: approval.reason ?? "approval_required",
+      executed_count: 0,
+    });
   }
 
   if (!options.executePayouts) {
@@ -1020,25 +963,11 @@ export async function runRoyaltyCycle(
       executedCount: 0,
       skipReason: "execute_payouts_not_configured",
     });
-    return {
-      status: "completed",
-      period: parsedInput.period,
-      pool_amount_minor: parsedInput.pool_amount_minor,
-      aggregation: {
-        pages_fetched: pagesFetched,
-        library_count: usageStats.length,
-        usage_stats: usageStats,
-      },
-      allocation,
-      persistence,
-      payout_batch: payoutBatch,
-      execution: {
-        status: "skipped",
-        reason: "execute_payouts_not_configured",
-        executed_count: 0,
-      },
-      notes,
-    };
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: "execute_payouts_not_configured",
+      executed_count: 0,
+    });
   }
 
   if (payoutExecutionCandidates.length === 0) {
@@ -1056,25 +985,11 @@ export async function runRoyaltyCycle(
       executedCount: 0,
       skipReason: "no_eligible_payouts",
     });
-    return {
-      status: "completed",
-      period: parsedInput.period,
-      pool_amount_minor: parsedInput.pool_amount_minor,
-      aggregation: {
-        pages_fetched: pagesFetched,
-        library_count: usageStats.length,
-        usage_stats: usageStats,
-      },
-      allocation,
-      persistence,
-      payout_batch: payoutBatch,
-      execution: {
-        status: "skipped",
-        reason: "no_eligible_payouts",
-        executed_count: 0,
-      },
-      notes,
-    };
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: "no_eligible_payouts",
+      executed_count: 0,
+    });
   }
 
   const existingExecutionRecorded = (
@@ -1107,25 +1022,11 @@ export async function runRoyaltyCycle(
       executedCount: 0,
       skipReason: "already_executed",
     });
-    return {
-      status: "completed",
-      period: parsedInput.period,
-      pool_amount_minor: parsedInput.pool_amount_minor,
-      aggregation: {
-        pages_fetched: pagesFetched,
-        library_count: usageStats.length,
-        usage_stats: usageStats,
-      },
-      allocation,
-      persistence,
-      payout_batch: payoutBatch,
-      execution: {
-        status: "skipped",
-        reason: "already_executed",
-        executed_count: 0,
-      },
-      notes,
-    };
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: "already_executed",
+      executed_count: 0,
+    });
   }
 
   const claimStatus = await executionClaimStore.tryClaim(
@@ -1152,25 +1053,11 @@ export async function runRoyaltyCycle(
       executedCount: 0,
       skipReason,
     });
-    return {
-      status: "completed",
-      period: parsedInput.period,
-      pool_amount_minor: parsedInput.pool_amount_minor,
-      aggregation: {
-        pages_fetched: pagesFetched,
-        library_count: usageStats.length,
-        usage_stats: usageStats,
-      },
-      allocation,
-      persistence,
-      payout_batch: payoutBatch,
-      execution: {
-        status: "skipped",
-        reason: skipReason,
-        executed_count: 0,
-      },
-      notes,
-    };
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: skipReason,
+      executed_count: 0,
+    });
   }
 
   let executionCompleted = false;
@@ -1223,23 +1110,9 @@ export async function runRoyaltyCycle(
     candidatePayoutCount: payoutExecutionCandidates.length,
     executedCount: executionResult.executed_count ?? payoutExecutionCandidates.length,
   });
-  return {
-    status: "completed",
-    period: parsedInput.period,
-    pool_amount_minor: parsedInput.pool_amount_minor,
-    aggregation: {
-      pages_fetched: pagesFetched,
-      library_count: usageStats.length,
-      usage_stats: usageStats,
-    },
-    allocation,
-    persistence,
-    payout_batch: payoutBatch,
-    execution: {
-      status: "executed",
-      executed_count: executionResult.executed_count ?? payoutExecutionCandidates.length,
-      results: executionResult.results ?? null,
-    },
-    notes,
-  };
+  return buildCompletedOutput({
+    status: "executed",
+    executed_count: executionResult.executed_count ?? payoutExecutionCandidates.length,
+    results: executionResult.results ?? null,
+  });
 }

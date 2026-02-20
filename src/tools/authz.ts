@@ -26,7 +26,7 @@ export const ToolPrincipalSchema = z.object({
 });
 export type ToolPrincipal = z.infer<typeof ToolPrincipalSchema>;
 
-export const DEFAULT_ALLOW_TEST_AUTH_BYPASS = true;
+export const DEFAULT_ALLOW_TEST_AUTH_BYPASS = false;
 
 const INTERNAL_TOOL_NAMES = new Set<GuardrailedToolName>([
   "aggregate_usage_for_period",
@@ -71,6 +71,14 @@ function resolveRuntimeEnvironment(
   return "production";
 }
 
+function resolveAllowTestBypass(override: boolean | undefined): boolean {
+  if (override !== undefined) {
+    return override;
+  }
+  const envValue = process.env.ALLOW_TEST_AUTH_BYPASS;
+  return envValue === "1" || envValue === "true";
+}
+
 export function requiresToolAuthorization(toolName: GuardrailedToolName): boolean {
   return INTERNAL_TOOL_NAMES.has(toolName);
 }
@@ -82,7 +90,7 @@ export function assertToolAuthorized(options: {
   allowTestBypass?: boolean;
 }): ToolPrincipal {
   const runtimeEnvironment = resolveRuntimeEnvironment(options.runtimeEnvironment);
-  const allowTestBypass = options.allowTestBypass ?? DEFAULT_ALLOW_TEST_AUTH_BYPASS;
+  const allowTestBypass = resolveAllowTestBypass(options.allowTestBypass);
   if (
     runtimeEnvironment === "test" &&
     allowTestBypass &&
