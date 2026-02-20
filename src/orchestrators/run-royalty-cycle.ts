@@ -32,6 +32,8 @@ import {
 import {
   computePayoutBatchHashFromOutput,
   getInMemoryPayoutBatchApproval,
+  PayoutBatchAdjustmentSchema,
+  PayoutBatchApprovalRecordSchema,
   type PayoutBatchAdjustment,
   type PayoutBatchApprovalRecord,
 } from "../tools/payout-batch-approval.js";
@@ -276,10 +278,12 @@ function applyApprovalAdjustments(
   payouts: PayoutBatchEntry[],
   adjustments: PayoutBatchAdjustment[]
 ): { status: "ok"; payouts: PayoutBatchEntry[] } | { status: "invalid"; reason: string } {
-  if (adjustments.length === 0) {
+  const parsedAdjustments = z.array(PayoutBatchAdjustmentSchema).min(1).safeParse(adjustments);
+  if (!parsedAdjustments.success) {
     return {
       status: "invalid",
-      reason: "approval adjusted decision requires non-empty adjustments",
+      reason:
+        "approval adjustments must include positive integer amount_minor values for each maintainer",
     };
   }
 
@@ -293,7 +297,7 @@ function applyApprovalAdjustments(
   const seenMaintainers = new Set<string>();
   const adjustmentAmountsByMaintainer = new Map<string, number>();
 
-  for (const adjustment of adjustments) {
+  for (const adjustment of parsedAdjustments.data) {
     if (seenMaintainers.has(adjustment.maintainer_id)) {
       return {
         status: "invalid",
@@ -569,7 +573,7 @@ async function resolvePayoutExecutionCandidates(params: {
     : null;
 
   if (!approval) {
-    const storedApproval = options.resolvePayoutBatchApproval
+    const unresolvedStoredApproval = options.resolvePayoutBatchApproval
       ? await options.resolvePayoutBatchApproval({
           period,
           payoutBatchHash,
@@ -578,6 +582,61 @@ async function resolvePayoutExecutionCandidates(params: {
           persistence,
         })
       : getInMemoryPayoutBatchApproval(period, payoutBatchHash);
+    let storedApproval: PayoutBatchApprovalRecord | null = null;
+    if (unresolvedStoredApproval !== null) {
+      const parsedStoredApproval =
+        PayoutBatchApprovalRecordSchema.safeParse(unresolvedStoredApproval);
+      if (!parsedStoredApproval.success) {
+        const skipReason = "invalid_stored_approval_record";
+        await appendAuditEvent("payout_execution_skipped", {
+          reason: skipReason,
+          candidate_payout_count: payoutBatch.payouts.length,
+          payout_batch_hash: payoutBatchHash,
+        });
+        await appendObservability({
+          pagesFetched,
+          libraryCount,
+          anomalyDetected: false,
+          anomalyCodes: [],
+          payoutOutcome: "skipped",
+          candidatePayoutCount: payoutBatch.payouts.length,
+          executedCount: 0,
+          skipReason,
+        });
+        return {
+          status: "skip",
+          reason: skipReason,
+        };
+      }
+      storedApproval = parsedStoredApproval.data;
+      if (
+        storedApproval.period !== period ||
+        storedApproval.payout_batch_hash !== payoutBatchHash
+      ) {
+        const skipReason = "stored_approval_context_mismatch";
+        await appendAuditEvent("payout_execution_skipped", {
+          reason: skipReason,
+          candidate_payout_count: payoutBatch.payouts.length,
+          payout_batch_hash: payoutBatchHash,
+          approval_period: storedApproval.period,
+          approval_payout_batch_hash: storedApproval.payout_batch_hash,
+        });
+        await appendObservability({
+          pagesFetched,
+          libraryCount,
+          anomalyDetected: false,
+          anomalyCodes: [],
+          payoutOutcome: "skipped",
+          candidatePayoutCount: payoutBatch.payouts.length,
+          executedCount: 0,
+          skipReason,
+        });
+        return {
+          status: "skip",
+          reason: skipReason,
+        };
+      }
+    }
 
     if (!storedApproval) {
       await appendAuditEvent("payout_approval_required", {
