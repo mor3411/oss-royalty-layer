@@ -34,6 +34,8 @@ const INTERNAL_TOOL_NAMES = new Set<GuardrailedToolName>([
   "compute_allocations",
   "persist_allocations",
   "create_payout_batch",
+  "append_royalty_cycle_audit",
+  "record_payout_batch_approval",
   "execute_payouts",
 ]);
 
@@ -44,6 +46,8 @@ const AUTHORIZED_ROLES_BY_TOOL: Record<GuardrailedToolName, ToolPrincipalRole[]>
   compute_allocations: ["manager", "admin", "service"],
   persist_allocations: ["manager", "admin", "service"],
   create_payout_batch: ["manager", "admin", "service"],
+  append_royalty_cycle_audit: ["manager", "admin", "service"],
+  record_payout_batch_approval: ["manager", "admin", "service"],
   execute_payouts: ["admin", "service"],
 };
 

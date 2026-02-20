@@ -8,6 +8,8 @@ import {
 describe("tool authorization", () => {
   it("identifies internal tools that require authorization", () => {
     expect(requiresToolAuthorization("aggregate_usage_for_period")).toBe(true);
+    expect(requiresToolAuthorization("append_royalty_cycle_audit")).toBe(true);
+    expect(requiresToolAuthorization("record_payout_batch_approval")).toBe(true);
     expect(requiresToolAuthorization("execute_payouts")).toBe(true);
     expect(requiresToolAuthorization("log_library_usage")).toBe(false);
   });

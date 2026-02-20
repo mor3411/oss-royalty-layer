@@ -10,6 +10,8 @@ export const GuardrailedToolNameSchema = z.enum([
   "compute_allocations",
   "persist_allocations",
   "create_payout_batch",
+  "append_royalty_cycle_audit",
+  "record_payout_batch_approval",
   "execute_payouts",
 ]);
 export type GuardrailedToolName = z.infer<typeof GuardrailedToolNameSchema>;
@@ -25,6 +27,8 @@ const TOOL_RISK_BY_NAME: Record<GuardrailedToolName, ToolRiskLevel> = {
   compute_allocations: "medium",
   persist_allocations: "medium",
   create_payout_batch: "high",
+  append_royalty_cycle_audit: "medium",
+  record_payout_batch_approval: "high",
   execute_payouts: "high",
 };
 
@@ -137,6 +141,25 @@ const CreatePayoutBatchOutputSanitySchema = z.object({
   notes: z.string().min(1),
 });
 
+const RecordPayoutBatchApprovalOutputSanitySchema = z.object({
+  status: z.literal("recorded"),
+  approval_event_id: z.string().min(1),
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  payout_batch_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  decision: z.enum(["approved", "adjusted", "denied"]),
+  reviewed_at: z.string().datetime(),
+});
+
+const AppendRoyaltyCycleAuditOutputSanitySchema = z.object({
+  status: z.literal("recorded"),
+  event_id: z.string().min(1),
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  run_id: z.string().min(1),
+  event_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  previous_event_hash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  observed_at: z.string().datetime(),
+});
+
 function estimatePayloadBytes(payload: unknown): number {
   const serialized = JSON.stringify(payload);
   return Buffer.byteLength(serialized, "utf8");
@@ -244,5 +267,15 @@ export function assertToolOutputSanity(
     ) {
       throw new Error("create_payout_batch totals are inconsistent");
     }
+    return;
+  }
+
+  if (toolName === "record_payout_batch_approval") {
+    RecordPayoutBatchApprovalOutputSanitySchema.parse(output);
+    return;
+  }
+
+  if (toolName === "append_royalty_cycle_audit") {
+    AppendRoyaltyCycleAuditOutputSanitySchema.parse(output);
   }
 }

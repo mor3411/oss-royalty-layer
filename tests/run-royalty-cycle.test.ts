@@ -11,8 +11,12 @@ import {
 import { createInMemoryLibraryRegistry } from "../src/tools/library-registry.js";
 import {
   clearInMemoryMaintainerProfiles,
+  clearInMemoryPayoutBatchApprovals,
   clearInMemoryPersistedAllocations,
+  clearInMemoryRoyaltyCycleAudits,
+  getInMemoryRoyaltyCycleAuditsByPeriod,
   getInMemoryPersistedAllocations,
+  recordPayoutBatchApproval,
   upsertInMemoryMaintainerProfile,
 } from "../src/tools/testing.js";
 
@@ -26,6 +30,8 @@ describe("runRoyaltyCycle", () => {
     clearInMemoryLibraryUsageIngestionEvents();
     clearInMemoryPersistedAllocations();
     clearInMemoryMaintainerProfiles();
+    clearInMemoryPayoutBatchApprovals();
+    clearInMemoryRoyaltyCycleAudits();
   });
 
   it("runs aggregate -> allocate -> persist -> payout -> execute", async () => {
@@ -135,6 +141,12 @@ describe("runRoyaltyCycle", () => {
     const persisted = getInMemoryPersistedAllocations();
     expect(persisted).toHaveLength(1);
     expect(persisted[0]?.period).toBe("2026-02");
+
+    const audits = getInMemoryRoyaltyCycleAuditsByPeriod("2026-02");
+    expect(audits.some((event) => event.event_type === "allocation_proposal_persisted")).toBe(
+      true
+    );
+    expect(audits.some((event) => event.event_type === "payout_execution_executed")).toBe(true);
   });
 
   it("skips execute stage when approval is denied", async () => {
@@ -311,5 +323,203 @@ describe("runRoyaltyCycle", () => {
     expect(output.execution.reason).toContain("top recipient share");
     expect(output.notes.some((note) => note.includes("concentration_spike"))).toBe(true);
     expect(executePayouts).not.toHaveBeenCalled();
+  });
+
+  it("executes only after a stored approval decision is recorded", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    const executePayouts = vi.fn((input: ExecutePayoutsInput) => ({
+      executed_count: input.payouts.length,
+      results: [],
+    }));
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 500,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      executePayouts,
+    };
+
+    const firstRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(firstRun.status).toBe("completed");
+    if (firstRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(firstRun.execution).toEqual({
+      status: "skipped",
+      reason: "approval_required",
+      executed_count: 0,
+    });
+    expect(executePayouts).not.toHaveBeenCalled();
+
+    const approvalHashNote = firstRun.notes.find((note) =>
+      note.startsWith("approval_hash=")
+    );
+    const approvalHash = approvalHashNote?.slice("approval_hash=".length);
+    if (!approvalHash) {
+      throw new Error("expected approval hash note");
+    }
+
+    const approval = await recordPayoutBatchApproval({
+      period: "2026-02",
+      payout_batch_hash: approvalHash,
+      decision: "approved",
+      reviewer_id: "fin.reviewer",
+      reason: "manual review passed",
+    });
+    expect(approval.status).toBe("recorded");
+
+    const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(secondRun.status).toBe("completed");
+    if (secondRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(secondRun.execution.status).toBe("executed");
+    expect(executePayouts).toHaveBeenCalledTimes(1);
+    expect(secondRun.notes).toContain("approval_decision=approved");
+    expect(secondRun.notes).toContain("approval_reviewer=fin.reviewer");
+  });
+
+  it("applies stored adjusted approval payouts before execution", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 8,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    const executePayouts = vi.fn((input: ExecutePayoutsInput) => ({
+      executed_count: input.payouts.length,
+      results: input.payouts,
+    }));
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 800,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      executePayouts,
+    };
+
+    const firstRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(firstRun.status).toBe("completed");
+    if (firstRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    if (firstRun.payout_batch.payouts.length !== 1) {
+      throw new Error("expected one payout in first run");
+    }
+    const originalAmount = firstRun.payout_batch.payouts[0]?.amount_minor ?? 0;
+    const adjustedAmount = Math.floor(originalAmount / 2);
+
+    const approvalHashNote = firstRun.notes.find((note) =>
+      note.startsWith("approval_hash=")
+    );
+    const approvalHash = approvalHashNote?.slice("approval_hash=".length);
+    if (!approvalHash) {
+      throw new Error("expected approval hash note");
+    }
+
+    await recordPayoutBatchApproval({
+      period: "2026-02",
+      payout_batch_hash: approvalHash,
+      decision: "adjusted",
+      reviewer_id: "fin.adjuster",
+      reason: "limit payout for manual holdback",
+      adjustments: [
+        {
+          maintainer_id: "mnt.alpha",
+          amount_minor: adjustedAmount,
+        },
+      ],
+    });
+
+    const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(secondRun.status).toBe("completed");
+    if (secondRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(secondRun.execution.status).toBe("executed");
+    expect(executePayouts).toHaveBeenCalledTimes(1);
+
+    const executeInput = executePayouts.mock.calls[0]?.[0];
+    expect(executeInput?.payouts[0]?.amount_minor).toBe(adjustedAmount);
+    expect(secondRun.notes).toContain("approval_decision=adjusted");
   });
 });

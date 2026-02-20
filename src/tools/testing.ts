@@ -18,3 +18,16 @@ export {
   getInMemoryMaintainerProfiles,
   upsertInMemoryMaintainerProfile,
 } from "./create-payout-batch.js";
+export {
+  appendRoyaltyCycleAuditEvent,
+  clearInMemoryRoyaltyCycleAudits,
+  getInMemoryRoyaltyCycleAudits,
+  getInMemoryRoyaltyCycleAuditsByPeriod,
+  verifyRoyaltyCycleAuditTrail,
+} from "./royalty-cycle-audit.js";
+export {
+  clearInMemoryPayoutBatchApprovals,
+  getInMemoryPayoutBatchApproval,
+  getInMemoryPayoutBatchApprovals,
+  recordPayoutBatchApproval,
+} from "./payout-batch-approval.js";

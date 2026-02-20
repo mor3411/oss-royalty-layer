@@ -195,3 +195,48 @@ export type {
   PayoutAnomalyCode,
   PayoutAnomalySignal,
 } from "./payout-anomaly-detector.js";
+
+export {
+  AppendRoyaltyCycleAuditEventInputSchema,
+  AppendRoyaltyCycleAuditEventOutputSchema,
+  RoyaltyCycleAuditEventTypeSchema,
+  RoyaltyCycleAuditPayloadSchema,
+  RoyaltyCycleAuditRecordSchema,
+  VerifyRoyaltyCycleAuditTrailOutputSchema,
+  appendRoyaltyCycleAuditEvent,
+  clearInMemoryRoyaltyCycleAudits,
+  getInMemoryRoyaltyCycleAudits,
+  getInMemoryRoyaltyCycleAuditsByPeriod,
+  verifyRoyaltyCycleAuditTrail,
+} from "./royalty-cycle-audit.js";
+export type {
+  AppendRoyaltyCycleAuditEventInput,
+  AppendRoyaltyCycleAuditEventOutput,
+  RoyaltyCycleAuditEventType,
+  RoyaltyCycleAuditPayload,
+  RoyaltyCycleAuditRecord,
+  RoyaltyCycleAuditStore,
+  VerifyRoyaltyCycleAuditTrailOutput,
+} from "./royalty-cycle-audit.js";
+
+export {
+  PayoutBatchAdjustmentSchema,
+  PayoutBatchApprovalDecisionSchema,
+  PayoutBatchApprovalRecordSchema,
+  RecordPayoutBatchApprovalInputSchema,
+  RecordPayoutBatchApprovalOutputSchema,
+  clearInMemoryPayoutBatchApprovals,
+  computePayoutBatchHash,
+  computePayoutBatchHashFromOutput,
+  getInMemoryPayoutBatchApproval,
+  getInMemoryPayoutBatchApprovals,
+  recordPayoutBatchApproval,
+} from "./payout-batch-approval.js";
+export type {
+  PayoutBatchAdjustment,
+  PayoutBatchApprovalDecision,
+  PayoutBatchApprovalRecord,
+  PayoutBatchApprovalStore,
+  RecordPayoutBatchApprovalInput,
+  RecordPayoutBatchApprovalOutput,
+} from "./payout-batch-approval.js";
