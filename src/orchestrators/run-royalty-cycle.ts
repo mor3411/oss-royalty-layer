@@ -730,11 +730,27 @@ export async function runRoyaltyCycle(
   const resolvedExecutionEnvironment = resolveExecutionRuntimeEnvironment(
     options.runtimeEnvironment
   );
-  if (options.executePayouts && !options.executionClaimStore && resolvedExecutionEnvironment === "production") {
-    throw new Error(
-      "payout execution requires a durable executionClaimStore in production; " +
-        "the default in-memory store is not safe for production use"
-    );
+  if (
+    options.executePayouts &&
+    resolvedExecutionEnvironment === "production"
+  ) {
+    const missingDurableStores: string[] = [];
+    if (!options.executionClaimStore) {
+      missingDurableStores.push("executionClaimStore");
+    }
+    if (!options.allocationStore) {
+      missingDurableStores.push("allocationStore");
+    }
+    if (!options.auditStore) {
+      missingDurableStores.push("auditStore");
+    }
+    if (missingDurableStores.length > 0) {
+      throw new Error(
+        `payout execution requires durable ${missingDurableStores.join(
+          ", "
+        )} in production; default in-memory stores are not safe for production use`
+      );
+    }
   }
   const notes: string[] = [];
   const mediumRisk = options.maxAllowedRisk ?? "medium";

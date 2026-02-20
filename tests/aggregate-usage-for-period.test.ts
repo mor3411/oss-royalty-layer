@@ -201,6 +201,25 @@ describe("aggregateUsageForPeriod", () => {
         }
       )
     ).rejects.toThrowError("invalid cursor");
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-02-19T00:00:00.000Z",
+          period_end: "2026-02-20T00:00:00.000Z",
+          page_size: 1,
+          cursor: firstPage.next_cursor,
+        },
+        {
+          eventStore,
+          principal: {
+            principal_id: "analyst-2",
+            role: "analyst",
+          },
+          resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
+        }
+      )
+    ).rejects.toThrowError("cursor does not match caller context");
   });
 
   it("memoizes resolver lookups for repeated library references", async () => {

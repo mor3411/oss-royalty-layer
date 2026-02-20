@@ -5,6 +5,15 @@ import {
   runRoyaltyCycle,
   type ExecutePayoutsInput,
 } from "../src/orchestrators/run-royalty-cycle.js";
+import type {
+  AllocationPersistenceStore,
+  PersistedAllocationRecord,
+  AllocationPersistenceAudit,
+} from "../src/tools/persist-allocations.js";
+import type {
+  RoyaltyCycleAuditStore,
+  RoyaltyCycleAuditRecord,
+} from "../src/tools/royalty-cycle-audit.js";
 import {
   clearInMemoryLibraryUsageIngestionEvents,
   createLibraryUsageIngestionPipeline,
@@ -27,6 +36,64 @@ const SESSION_IDS = {
   one: "a".repeat(64),
   two: "b".repeat(64),
 } as const;
+
+function createDurableStoreAdapters(): {
+  allocationStore: AllocationPersistenceStore;
+  auditStore: RoyaltyCycleAuditStore;
+} {
+  const allocationRecordsByPeriod = new Map<string, PersistedAllocationRecord>();
+  const allocationAudits: AllocationPersistenceAudit[] = [];
+  const auditRecordsByPeriod = new Map<string, RoyaltyCycleAuditRecord[]>();
+
+  const allocationStore: AllocationPersistenceStore = {
+    readByPeriod(period: string): PersistedAllocationRecord | null {
+      return allocationRecordsByPeriod.get(period) ?? null;
+    },
+    appendRecord(record: PersistedAllocationRecord): void {
+      if (allocationRecordsByPeriod.has(record.period)) {
+        throw new Error(`allocation record for period ${record.period} already exists`);
+      }
+      allocationRecordsByPeriod.set(record.period, record);
+    },
+    appendAudit(audit: AllocationPersistenceAudit): void {
+      allocationAudits.push(audit);
+    },
+  };
+
+  const auditStore: RoyaltyCycleAuditStore = {
+    readLatestByPeriod(period: string): RoyaltyCycleAuditRecord | null {
+      const records = auditRecordsByPeriod.get(period) ?? [];
+      return records.at(-1) ?? null;
+    },
+    appendRecord(
+      record: RoyaltyCycleAuditRecord,
+      expectedPreviousEventHash?: string | null
+    ): void {
+      const records = auditRecordsByPeriod.get(record.period) ?? [];
+      const latestHash = records.at(-1)?.event_hash ?? null;
+      if (
+        expectedPreviousEventHash !== undefined &&
+        latestHash !== expectedPreviousEventHash
+      ) {
+        const error = new Error("previous event hash mismatch") as Error & {
+          code?: string;
+        };
+        error.code = "audit_previous_hash_mismatch";
+        throw error;
+      }
+      records.push(record);
+      auditRecordsByPeriod.set(record.period, records);
+    },
+    readByPeriod(period: string): RoyaltyCycleAuditRecord[] {
+      return [...(auditRecordsByPeriod.get(period) ?? [])];
+    },
+  };
+
+  return {
+    allocationStore,
+    auditStore,
+  };
+}
 
 describe("runRoyaltyCycle", () => {
   beforeEach(() => {
@@ -307,6 +374,7 @@ describe("runRoyaltyCycle", () => {
   it("rejects payout execution for unauthorized principals in production", async () => {
     const pipeline = createLibraryUsageIngestionPipeline();
     const registry = createInMemoryLibraryRegistry();
+    const { allocationStore, auditStore } = createDurableStoreAdapters();
 
     await pipeline.enqueueEvent({
       session_id: SESSION_IDS.one,
@@ -360,6 +428,8 @@ describe("runRoyaltyCycle", () => {
           detectPayoutAnomalies: () => ({ has_anomaly: false }),
           approvePayoutBatch: () => ({ approved: true }),
           executePayouts,
+          allocationStore,
+          auditStore,
           executionClaimStore: {
             tryClaim: () => "acquired" as const,
             markExecuted: () => {},
@@ -1183,6 +1253,7 @@ describe("runRoyaltyCycle", () => {
   it("refuses payout execution with default in-memory claim store in production", async () => {
     const pipeline = createLibraryUsageIngestionPipeline();
     const registry = createInMemoryLibraryRegistry();
+    const { allocationStore, auditStore } = createDurableStoreAdapters();
 
     await pipeline.enqueueEvent({
       session_id: SESSION_IDS.one,
@@ -1234,6 +1305,8 @@ describe("runRoyaltyCycle", () => {
             executed_count: input.payouts.length,
             results: [],
           }),
+          allocationStore,
+          auditStore,
           runtimeEnvironment: "production",
           principal: {
             principal_id: "svc-1",
@@ -1241,8 +1314,37 @@ describe("runRoyaltyCycle", () => {
           },
         }
       )
-    ).rejects.toThrowError("durable executionClaimStore in production");
+    ).rejects.toThrowError("durable executionClaimStore");
     expect(getInMemoryPersistedAllocations()).toHaveLength(0);
+  });
+
+  it("requires durable allocation and audit stores for production payout execution", async () => {
+    await expect(
+      runRoyaltyCycle(
+        {
+          period: "2026-02",
+          period_start: "2026-02-19T00:00:00.000Z",
+          period_end: "2026-02-20T00:00:00.000Z",
+          pool_amount_minor: 500,
+        },
+        {
+          executePayouts: (input) => ({
+            executed_count: input.payouts.length,
+            results: [],
+          }),
+          executionClaimStore: {
+            tryClaim: () => "acquired" as const,
+            markExecuted: () => {},
+            releaseClaim: () => {},
+          },
+          runtimeEnvironment: "production",
+          principal: {
+            principal_id: "svc-1",
+            role: "service",
+          },
+        }
+      )
+    ).rejects.toThrowError("durable allocationStore, auditStore");
   });
 
   it("skips execution when callback adjustments alter payout destination data", async () => {

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   assertToolAuthorized,
+  type ToolPrincipal,
   type AuthorizationRuntimeEnvironment,
 } from "./authz.js";
 import {
@@ -68,12 +69,14 @@ type AggregationCursor = {
   snapshot_id: string;
   offset: number;
   query_hash: string;
+  principal_scope_hash: string;
 };
 
 type AggregationSnapshot = {
   aggregates: AggregatedLibraryUsage[];
   expiresAtMs: number;
   queryHash: string;
+  principalScopeHash: string;
 };
 
 const aggregationSnapshotStore = new Map<string, AggregationSnapshot>();
@@ -84,6 +87,19 @@ function encodeCursor(cursor: AggregationCursor): string {
 
 function computeQueryHash(periodStart: string, periodEnd: string): string {
   return createHash("sha256").update(periodStart).update(":").update(periodEnd).digest("hex");
+}
+
+function computePrincipalScopeHash(principal: ToolPrincipal): string {
+  const normalizedScopes = [...principal.scopes].sort((left, right) =>
+    left.localeCompare(right)
+  );
+  return createHash("sha256")
+    .update(principal.principal_id)
+    .update(":")
+    .update(principal.role)
+    .update(":")
+    .update(JSON.stringify(normalizedScopes))
+    .digest("hex");
 }
 
 function decodeCursor(cursor: string): AggregationCursor {
@@ -100,6 +116,7 @@ function decodeCursor(cursor: string): AggregationCursor {
       snapshot_id: z.string().uuid(),
       offset: z.number().int().nonnegative(),
       query_hash: z.string().regex(/^[a-f0-9]{64}$/),
+      principal_scope_hash: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .safeParse(parsedValue);
   if (!parsedCursor.success) {
@@ -133,13 +150,19 @@ function toSafeIntegerSum(left: number, right: number): number | null {
   return Number(sum);
 }
 
-function storeSnapshot(aggregates: AggregatedLibraryUsage[], nowMs: number, queryHash: string): string {
+function storeSnapshot(
+  aggregates: AggregatedLibraryUsage[],
+  nowMs: number,
+  queryHash: string,
+  principalScopeHash: string
+): string {
   cleanupAggregationSnapshots(nowMs);
   const snapshotId = randomUUID();
   aggregationSnapshotStore.set(snapshotId, {
     aggregates,
     expiresAtMs: nowMs + AGGREGATION_SNAPSHOT_TTL_MS,
     queryHash,
+    principalScopeHash,
   });
   return snapshotId;
 }
@@ -202,7 +225,7 @@ export async function aggregateUsageForPeriod(
   input: unknown,
   options: AggregateUsageForPeriodOptions
 ): Promise<AggregateUsageForPeriodOutput> {
-  assertToolAuthorized({
+  const principal = assertToolAuthorized({
     toolName: "aggregate_usage_for_period",
     ...(options.principal === undefined ? {} : { principal: options.principal }),
     ...(options.runtimeEnvironment === undefined
@@ -212,6 +235,7 @@ export async function aggregateUsageForPeriod(
       ? {}
       : { allowTestBypass: options.allowTestAuthBypass }),
   });
+  const principalScopeHash = computePrincipalScopeHash(principal);
   assertToolRiskAllowed({
     toolName: "aggregate_usage_for_period",
     ...(options.maxAllowedRisk === undefined
@@ -246,6 +270,9 @@ export async function aggregateUsageForPeriod(
     if (decodedCursor.query_hash !== queryHash) {
       throw new Error("cursor does not match query");
     }
+    if (decodedCursor.principal_scope_hash !== principalScopeHash) {
+      throw new Error("cursor does not match caller context");
+    }
     const snapshot = aggregationSnapshotStore.get(decodedCursor.snapshot_id);
     if (!snapshot || snapshot.expiresAtMs <= nowMs) {
       aggregationSnapshotStore.delete(decodedCursor.snapshot_id);
@@ -253,6 +280,9 @@ export async function aggregateUsageForPeriod(
     }
     if (snapshot.queryHash !== queryHash) {
       throw new Error("cursor does not match query");
+    }
+    if (snapshot.principalScopeHash !== principalScopeHash) {
+      throw new Error("cursor does not match caller context");
     }
     snapshot.expiresAtMs = nowMs + AGGREGATION_SNAPSHOT_TTL_MS;
     aggregatesSource = snapshot.aggregates;
@@ -284,13 +314,19 @@ export async function aggregateUsageForPeriod(
   }
 
   if (!snapshotIdForNextPage) {
-    snapshotIdForNextPage = storeSnapshot(aggregatesSource, nowMs, queryHash);
+    snapshotIdForNextPage = storeSnapshot(
+      aggregatesSource,
+      nowMs,
+      queryHash,
+      principalScopeHash
+    );
   }
 
   const nextCursor = encodeCursor({
     snapshot_id: snapshotIdForNextPage,
     offset: pageEnd,
     query_hash: queryHash,
+    principal_scope_hash: principalScopeHash,
   });
 
   const output = {

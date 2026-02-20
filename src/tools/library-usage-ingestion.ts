@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, appendFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, appendFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
+import { createInterface } from "node:readline";
 import { z } from "zod";
 
 import { LibraryUsageLoggedEventSchema, type EnqueueLibraryUsageEvent } from "./log-library-usage.js";
 
 export const MAX_IN_MEMORY_INGESTED_EVENTS = 50_000;
+export const DEFAULT_NDJSON_EVENT_STORE_MAX_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_NDJSON_EVENT_STORE_MAX_FILES = 5;
 
 export const LibraryUsageLoggedEnvelopeSchema = z.object({
   event_id: z.string().min(1),
@@ -34,6 +38,8 @@ export type LibraryUsageEventStore = {
 export type NdjsonLibraryUsageEventStoreOptions = {
   strictRead?: boolean;
   onInvalidLine?: (line: number, message: string) => void;
+  maxBytes?: number;
+  maxFiles?: number;
 };
 
 type LibraryUsageIngestionPipelineOptions = {
@@ -92,48 +98,134 @@ export function getInMemoryLibraryUsageIngestionEvents(): LibraryUsageLoggedEnve
   return [...inMemoryIngestedEvents];
 }
 
+function isErrnoCode(error: unknown, code: string): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === code;
+}
+
+async function rotateNdjsonEventStoreIfNeeded(
+  filePath: string,
+  maxBytes: number,
+  maxFiles: number
+): Promise<void> {
+  let currentSize = 0;
+  try {
+    const fileStats = await stat(filePath);
+    currentSize = fileStats.size;
+  } catch (error) {
+    if (isErrnoCode(error, "ENOENT")) {
+      return;
+    }
+    throw error;
+  }
+
+  if (currentSize < maxBytes) {
+    return;
+  }
+
+  if (maxFiles <= 1) {
+    await unlink(filePath).catch((error) => {
+      if (!isErrnoCode(error, "ENOENT")) {
+        throw error;
+      }
+    });
+    return;
+  }
+
+  const oldestBackupPath = `${filePath}.${maxFiles - 1}`;
+  await unlink(oldestBackupPath).catch((error) => {
+    if (!isErrnoCode(error, "ENOENT")) {
+      throw error;
+    }
+  });
+
+  for (let index = maxFiles - 2; index >= 1; index -= 1) {
+    const sourcePath = `${filePath}.${index}`;
+    const destinationPath = `${filePath}.${index + 1}`;
+    await rename(sourcePath, destinationPath).catch((error) => {
+      if (!isErrnoCode(error, "ENOENT")) {
+        throw error;
+      }
+    });
+  }
+
+  await rename(filePath, `${filePath}.1`);
+}
+
+function toReadPaths(filePath: string, maxFiles: number): string[] {
+  const paths: string[] = [];
+  for (let index = maxFiles - 1; index >= 1; index -= 1) {
+    paths.push(`${filePath}.${index}`);
+  }
+  paths.push(filePath);
+  return paths;
+}
+
 export function createNdjsonLibraryUsageEventStore(
   filePath: string,
   options: NdjsonLibraryUsageEventStoreOptions = {}
 ): LibraryUsageEventStore {
-  const strictRead = options.strictRead ?? false;
+  const strictRead = options.strictRead ?? true;
+  const maxBytes = options.maxBytes ?? DEFAULT_NDJSON_EVENT_STORE_MAX_BYTES;
+  const maxFiles = options.maxFiles ?? DEFAULT_NDJSON_EVENT_STORE_MAX_FILES;
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("maxBytes must be a positive integer");
+  }
+  if (!Number.isInteger(maxFiles) || maxFiles <= 0) {
+    throw new Error("maxFiles must be a positive integer");
+  }
 
   return {
     async append(envelope: LibraryUsageLoggedEnvelope): Promise<void> {
       await mkdir(dirname(filePath), { recursive: true });
+      await rotateNdjsonEventStoreIfNeeded(filePath, maxBytes, maxFiles);
       await appendFile(filePath, `${JSON.stringify(envelope)}\n`, "utf8");
     },
 
     async readAll(): Promise<LibraryUsageLoggedEnvelope[]> {
-      let contents = "";
-      try {
-        contents = await readFile(filePath, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          return [];
-        }
-        throw error;
-      }
-
-      const lines = contents
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-
       const parsedEnvelopes: LibraryUsageLoggedEnvelope[] = [];
-      lines.forEach((line, index) => {
+      let lineNumber = 0;
+      const readPaths = toReadPaths(filePath, maxFiles);
+
+      for (const path of readPaths) {
         try {
-          const parsed = JSON.parse(line) as unknown;
-          parsedEnvelopes.push(LibraryUsageLoggedEnvelopeSchema.parse(parsed));
+          await stat(path);
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : `invalid envelope at line ${index + 1}`;
-          options.onInvalidLine?.(index + 1, message);
-          if (strictRead) {
-            throw new Error(`invalid envelope at line ${index + 1} in ${filePath}`);
+          if (isErrnoCode(error, "ENOENT")) {
+            continue;
           }
+          throw error;
         }
-      });
+
+        const stream = createReadStream(path, { encoding: "utf8" });
+        const reader = createInterface({
+          input: stream,
+          crlfDelay: Infinity,
+        });
+        try {
+          for await (const rawLine of reader) {
+            const line = rawLine.trim();
+            if (line.length === 0) {
+              continue;
+            }
+            lineNumber += 1;
+            try {
+              const parsed = JSON.parse(line) as unknown;
+              parsedEnvelopes.push(LibraryUsageLoggedEnvelopeSchema.parse(parsed));
+            } catch (error) {
+              const message =
+                error instanceof Error
+                  ? error.message
+                  : `invalid envelope at line ${lineNumber}`;
+              options.onInvalidLine?.(lineNumber, message);
+              if (strictRead) {
+                throw new Error(`invalid envelope at line ${lineNumber} in ${path}`);
+              }
+            }
+          }
+        } finally {
+          reader.close();
+        }
+      }
 
       return parsedEnvelopes;
     },

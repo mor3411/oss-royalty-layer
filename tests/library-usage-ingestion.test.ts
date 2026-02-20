@@ -109,6 +109,7 @@ describe("library usage ingestion pipeline", () => {
 
     const store = createNdjsonLibraryUsageEventStore(filePath, {
       onInvalidLine: invalidLineSpy,
+      strictRead: false,
     });
     const restored = await store.readAll();
 
@@ -116,6 +117,17 @@ describe("library usage ingestion pipeline", () => {
     expect(restored[0]?.event_id).toBe("evt_123");
     expect(invalidLineSpy).toHaveBeenCalledTimes(1);
     expect(invalidLineSpy).toHaveBeenCalledWith(2, expect.any(String));
+  });
+
+  it("defaults to strict read mode for malformed NDJSON lines", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+
+    await writeFile(filePath, `{"bad-json":\n`, "utf8");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath);
+    await expect(store.readAll()).rejects.toThrowError("invalid envelope at line 1");
   });
 
   it("throws on malformed NDJSON lines in strict read mode", async () => {
@@ -130,5 +142,40 @@ describe("library usage ingestion pipeline", () => {
     });
 
     await expect(store.readAll()).rejects.toThrowError("invalid envelope at line 1");
+  });
+
+  it("rotates NDJSON event logs and reads retained history in order", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oss-royalty-layer-"));
+    tempDirs.push(dir);
+    const filePath = join(dir, "library-usage.ndjson");
+
+    const store = createNdjsonLibraryUsageEventStore(filePath, {
+      maxBytes: 1,
+      maxFiles: 3,
+    });
+    const pipeline = createLibraryUsageIngestionPipeline({
+      eventStore: store,
+      eventIdGenerator: (_event, ingestIndex) => `evt_${ingestIndex}`,
+      now: () => Date.parse("2026-02-19T22:03:00.000Z"),
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await pipeline.enqueueEvent({
+        ...sampleEvent,
+        library: {
+          ...sampleEvent.library,
+          name: `pkg-${index}`,
+        },
+      });
+    }
+
+    const restored = await createNdjsonLibraryUsageEventStore(filePath, {
+      maxFiles: 3,
+    }).readAll();
+    expect(restored.map((envelope) => envelope.event_id)).toEqual([
+      "evt_3",
+      "evt_4",
+      "evt_5",
+    ]);
   });
 });
