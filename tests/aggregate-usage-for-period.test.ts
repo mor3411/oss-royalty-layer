@@ -293,4 +293,52 @@ describe("aggregateUsageForPeriod", () => {
     );
     expect(allowed).toEqual({ aggregates: [] });
   });
+
+  it("rejects usage aggregation overflow", async () => {
+    clearInMemoryLibraryUsageIngestionEvents();
+
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "api",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "zod",
+        ecosystem: "npm",
+        version: "3.23.8",
+        calls: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.two,
+      source: "api",
+      ts: "2026-02-19T11:00:00.000Z",
+      library: {
+        name: "zod",
+        ecosystem: "npm",
+        version: "3.23.8",
+        calls: 1,
+      },
+    });
+
+    await expect(
+      aggregateUsageForPeriod(
+        {
+          period_start: "2026-02-19T00:00:00.000Z",
+          period_end: "2026-02-20T00:00:00.000Z",
+        },
+        {
+          eventStore: {
+            readAll: pipeline.readIngestedEvents,
+            append: () => {
+              throw new Error("not used in aggregation");
+            },
+          },
+          resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
+        }
+      )
+    ).rejects.toThrowError("aggregate total_calls overflow");
+  });
 });

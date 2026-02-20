@@ -37,6 +37,11 @@ describe("payout batch approval tool", () => {
       decision: "approved",
       reviewer_id: "fin.reviewer",
       reason: "manual review accepted",
+    }, {
+      principal: {
+        principal_id: "fin.reviewer",
+        role: "manager",
+      },
     });
     expect(result.status).toBe("recorded");
 
@@ -55,6 +60,11 @@ describe("payout batch approval tool", () => {
         decision: "adjusted",
         reviewer_id: "fin.reviewer",
         reason: "adjusting payout",
+      }, {
+        principal: {
+          principal_id: "fin.reviewer",
+          role: "manager",
+        },
       })
     ).rejects.toThrowError("requires at least one payout adjustment");
   });
@@ -87,6 +97,11 @@ describe("payout batch approval tool", () => {
       decision: "approved",
       reviewer_id: "fin.reviewer",
       reason: "first approval",
+    }, {
+      principal: {
+        principal_id: "fin.reviewer",
+        role: "manager",
+      },
     });
 
     await expect(
@@ -96,6 +111,11 @@ describe("payout batch approval tool", () => {
         decision: "denied",
         reviewer_id: "fin.reviewer",
         reason: "attempt to overwrite",
+      }, {
+        principal: {
+          principal_id: "fin.reviewer",
+          role: "manager",
+        },
       })
     ).rejects.toThrowError("approvals are immutable");
   });
@@ -123,5 +143,25 @@ describe("payout batch approval tool", () => {
     const stored = getInMemoryPayoutBatchApproval("2026-03", hash);
     expect(stored).not.toBeNull();
     expect(stored?.reviewer_id).toBe("mgr-finance-1");
+  });
+
+  it("rejects approvals from reserved synthetic principals", async () => {
+    clearInMemoryPayoutBatchApprovals();
+
+    await expect(
+      recordPayoutBatchApproval(
+        {
+          period: "2026-02",
+          payout_batch_hash: "e".repeat(64),
+          decision: "approved",
+          reviewer_id: "fin.reviewer",
+          reason: "manual review accepted",
+        },
+        {
+          runtimeEnvironment: "test",
+          allowTestAuthBypass: true,
+        }
+      )
+    ).rejects.toThrowError("reserved principals cannot record payout batch approvals");
   });
 });

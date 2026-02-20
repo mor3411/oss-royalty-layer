@@ -102,6 +102,21 @@ function scoreUsage(
   return score > 0 ? score : 1;
 }
 
+/**
+ * Converts float weights to integer-scaled values suitable for BigInt
+ * arithmetic.  Each weight is multiplied by a large scaling factor and
+ * rounded, which preserves relative proportions while allowing all
+ * subsequent division to happen in BigInt (no float precision loss on
+ * monetary amounts).
+ */
+function toScaledBigIntWeights(weights: number[]): bigint[] {
+  // Scale factor: 10^12 – enough precision for log-based scores
+  return weights.map((w) => {
+    const scaled = Math.round(w * 1e12);
+    return scaled > 0 ? BigInt(scaled) : 0n;
+  });
+}
+
 function distributeProportionally(
   total: number,
   weights: number[],
@@ -117,22 +132,34 @@ function distributeProportionally(
     totalWeight > 0
       ? sanitizedWeights
       : sanitizedWeights.map(() => 1);
-  const effectiveTotalWeight = effectiveWeights.reduce((sum, weight) => sum + weight, 0);
 
-  const allocations = effectiveWeights.map((weight) =>
-    Math.floor((total * weight) / effectiveTotalWeight)
+  // Use BigInt arithmetic to avoid float precision loss on monetary values.
+  const bigTotal = BigInt(total);
+  const scaledWeights = toScaledBigIntWeights(effectiveWeights);
+  const bigTotalWeight = scaledWeights.reduce((sum, w) => sum + w, 0n);
+
+  if (bigTotalWeight === 0n) {
+    return effectiveWeights.map(() => 0);
+  }
+
+  const allocations = scaledWeights.map((w) =>
+    Number((bigTotal * w) / bigTotalWeight)
   );
   let remainder = total - allocations.reduce((sum, amount) => sum + amount, 0);
   if (remainder <= 0) {
     return allocations;
   }
 
-  const rankedRemainders = effectiveWeights
-    .map((weight, index) => {
-      const exact = (total * weight) / effectiveTotalWeight;
+  // Rank by fractional remainder (computed via BigInt modular arithmetic) to
+  // distribute the leftover units one-at-a-time in largest-remainder order.
+  const rankedRemainders = scaledWeights
+    .map((w, index) => {
+      const rem = (bigTotal * w) % bigTotalWeight;
       return {
         index,
-        fractional: exact - Math.floor(exact),
+        // Scale remainder to a comparable float; precision loss here is
+        // acceptable because we only need a ranking, not an exact value.
+        fractional: Number(rem) / Number(bigTotalWeight),
         tieBreaker: tieBreakerKeys[index] ?? "",
       };
     })
@@ -349,10 +376,10 @@ export async function computeAllocations(
   }
 
   const totalAllocated = allocations.reduce(
-    (sum, allocation) => sum + allocation.amount_minor,
-    0
+    (sum, allocation) => sum + BigInt(allocation.amount_minor),
+    0n
   );
-  if (totalAllocated !== parsedInput.pool_amount_minor) {
+  if (totalAllocated !== BigInt(parsedInput.pool_amount_minor)) {
     throw new Error(
       `allocation total ${totalAllocated} does not equal pool ${parsedInput.pool_amount_minor}`
     );

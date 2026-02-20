@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createPayoutBatch } from "../src/tools/create-payout-batch.js";
-import { persistAllocations } from "../src/tools/persist-allocations.js";
+import {
+  persistAllocations,
+  type AllocationPersistenceStore,
+} from "../src/tools/persist-allocations.js";
 import {
   clearInMemoryMaintainerProfiles,
   clearInMemoryPersistedAllocations,
@@ -198,5 +201,35 @@ describe("createPayoutBatch", () => {
         }
       )
     ).rejects.toThrowError("requires high risk allowance");
+  });
+
+  it("rejects allocation aggregation overflow from external stores", async () => {
+    const overflowedStore: Pick<AllocationPersistenceStore, "readByPeriod"> = {
+      readByPeriod: () =>
+        ({
+          period: PERIOD,
+          allocations: [
+            {
+              maintainer_id: "mnt.overflow",
+              amount_minor: Number.MAX_SAFE_INTEGER,
+            },
+            {
+              maintainer_id: "mnt.overflow",
+              amount_minor: 1,
+            },
+          ],
+        }) as never,
+    };
+    await expect(
+      createPayoutBatch(
+        {
+          period: PERIOD,
+          currency: "USD",
+        },
+        {
+          allocationStore: overflowedStore,
+        }
+      )
+    ).rejects.toThrowError("allocation aggregation overflow");
   });
 });

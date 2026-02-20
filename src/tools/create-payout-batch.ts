@@ -85,6 +85,14 @@ type CreatePayoutBatchOptions = {
 
 const inMemoryMaintainerProfiles = new Map<string, MaintainerPayoutProfile>();
 
+function toSafeIntegerSum(left: number, right: number): number | null {
+  const sum = BigInt(left) + BigInt(right);
+  if (sum > BigInt(Number.MAX_SAFE_INTEGER) || sum < BigInt(Number.MIN_SAFE_INTEGER)) {
+    return null;
+  }
+  return Number(sum);
+}
+
 function cloneMaintainerProfile(profile: MaintainerPayoutProfile): MaintainerPayoutProfile {
   return {
     ...profile,
@@ -159,9 +167,16 @@ export async function createPayoutBatch(
       amount_minor: 0,
       allocation_count: 0,
     };
+    const nextAmountMinor = toSafeIntegerSum(current.amount_minor, allocation.amount_minor);
+    const nextAllocationCount = toSafeIntegerSum(current.allocation_count, 1);
+    if (nextAmountMinor === null || nextAllocationCount === null) {
+      throw new Error(
+        `allocation aggregation overflow for maintainer ${allocation.maintainer_id}`
+      );
+    }
     byMaintainer.set(allocation.maintainer_id, {
-      amount_minor: current.amount_minor + allocation.amount_minor,
-      allocation_count: current.allocation_count + 1,
+      amount_minor: nextAmountMinor,
+      allocation_count: nextAllocationCount,
     });
   }
 
@@ -220,14 +235,33 @@ export async function createPayoutBatch(
     });
   }
 
-  const totalAmountMinor = [...byMaintainer.values()].reduce(
-    (sum, entry) => sum + entry.amount_minor,
-    0
-  );
-  const eligibleAmountMinor = payouts.reduce((sum, payout) => sum + payout.amount_minor, 0);
-  const flaggedAmountMinor = flagged.reduce((sum, item) => sum + item.amount_minor, 0);
+  let totalAmountMinor = 0;
+  for (const entry of byMaintainer.values()) {
+    const next = toSafeIntegerSum(totalAmountMinor, entry.amount_minor);
+    if (next === null) {
+      throw new Error("payout total_amount_minor overflow");
+    }
+    totalAmountMinor = next;
+  }
+  let eligibleAmountMinor = 0;
+  for (const payout of payouts) {
+    const next = toSafeIntegerSum(eligibleAmountMinor, payout.amount_minor);
+    if (next === null) {
+      throw new Error("payout eligible_amount_minor overflow");
+    }
+    eligibleAmountMinor = next;
+  }
+  let flaggedAmountMinor = 0;
+  for (const item of flagged) {
+    const next = toSafeIntegerSum(flaggedAmountMinor, item.amount_minor);
+    if (next === null) {
+      throw new Error("payout flagged_amount_minor overflow");
+    }
+    flaggedAmountMinor = next;
+  }
 
-  if (eligibleAmountMinor + flaggedAmountMinor !== totalAmountMinor) {
+  const recomputedTotal = toSafeIntegerSum(eligibleAmountMinor, flaggedAmountMinor);
+  if (recomputedTotal === null || recomputedTotal !== totalAmountMinor) {
     throw new Error("payout batch totals are inconsistent");
   }
 

@@ -255,6 +255,23 @@ function buildComputePolicy(
   return ComputeAllocationsPolicySchema.parse(policy);
 }
 
+function resolveExecutionRuntimeEnvironment(
+  override: AuthorizationRuntimeEnvironment | undefined
+): AuthorizationRuntimeEnvironment {
+  const parsedProcessEnv = AuthorizationRuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV);
+  // In production, ignore overrides to prevent downgrade attacks.
+  if (parsedProcessEnv.success && parsedProcessEnv.data === "production") {
+    return "production";
+  }
+  if (override !== undefined) {
+    return override;
+  }
+  if (parsedProcessEnv.success) {
+    return parsedProcessEnv.data;
+  }
+  return "production";
+}
+
 function applyApprovalAdjustments(
   payouts: PayoutBatchEntry[],
   adjustments: PayoutBatchAdjustment[]
@@ -394,6 +411,15 @@ export async function runRoyaltyCycle(
   options: RunRoyaltyCycleOptions = {}
 ): Promise<RunRoyaltyCycleOutput> {
   const parsedInput = RunRoyaltyCycleInputSchema.parse(input);
+  const resolvedExecutionEnvironment = resolveExecutionRuntimeEnvironment(
+    options.runtimeEnvironment
+  );
+  if (options.executePayouts && !options.executionClaimStore && resolvedExecutionEnvironment === "production") {
+    throw new Error(
+      "payout execution requires a durable executionClaimStore in production; " +
+        "the default in-memory store is not safe for production use"
+    );
+  }
   const notes: string[] = [];
   const mediumRisk = options.maxAllowedRisk ?? "medium";
   const payoutRisk = options.payoutMaxAllowedRisk ?? "high";
@@ -713,7 +739,6 @@ export async function runRoyaltyCycle(
   });
   notes.push(`approval_hash=${payoutBatchHash}`);
   const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${persistence.record_id}`;
-  const usingDefaultClaimStore = !options.executionClaimStore;
   const executionClaimStore =
     options.executionClaimStore ?? inMemoryPayoutExecutionClaimStore;
   const buildCompletedOutput = (
@@ -994,6 +1019,46 @@ export async function runRoyaltyCycle(
     });
   }
 
+  // Acquire the execution claim FIRST to act as the authoritative lock.
+  // This eliminates the TOCTOU gap that existed when audit-trail reads
+  // preceded the claim attempt — concurrent invocations could both pass
+  // the audit check before either acquired the claim.
+  const claimStatus = await executionClaimStore.tryClaim(
+    payoutExecutionIdempotencyKey
+  );
+  if (claimStatus !== "acquired") {
+    const skipReason =
+      claimStatus === "already_executed"
+        ? "already_executed"
+        : "payout_execution_in_progress";
+    await appendAuditEvent("payout_execution_skipped", {
+      reason: skipReason,
+      allocation_record_id: persistence.record_id,
+      candidate_payout_count: payoutExecutionCandidates.length,
+      payout_batch_hash: payoutBatchHash,
+      idempotency_key: payoutExecutionIdempotencyKey,
+    });
+    await appendObservability({
+      pagesFetched,
+      libraryCount: usageStats.length,
+      anomalyDetected: false,
+      anomalyCodes: [],
+      payoutOutcome: "skipped",
+      candidatePayoutCount: payoutExecutionCandidates.length,
+      executedCount: 0,
+      skipReason,
+    });
+    return buildCompletedOutput({
+      status: "skipped",
+      reason: skipReason,
+      executed_count: 0,
+    });
+  }
+
+  // Secondary verification: while holding the claim, confirm that no prior
+  // execution is recorded in the audit trail.  If a stale audit record is
+  // found (e.g. claim store was reset but audit trail persists), release
+  // the claim and skip to avoid double-payout.
   const periodAudits =
     (
       options.auditStore
@@ -1027,6 +1092,8 @@ export async function runRoyaltyCycle(
     return event.payload.payout_batch_hash === payoutBatchHash;
   });
   if (existingExecutionRecorded) {
+    // Mark the claim as executed so future invocations short-circuit at
+    // the claim level without needing to re-read the audit trail.
     await executionClaimStore.markExecuted(payoutExecutionIdempotencyKey);
     await appendAuditEvent("payout_execution_skipped", {
       reason: "already_executed",
@@ -1048,54 +1115,6 @@ export async function runRoyaltyCycle(
     return buildCompletedOutput({
       status: "skipped",
       reason: "already_executed",
-      executed_count: 0,
-    });
-  }
-
-  if (usingDefaultClaimStore) {
-    const parsedProcessEnv = AuthorizationRuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV);
-    // Mirror authz.ts: when NODE_ENV is production, ignore overrides.
-    const resolvedEnv =
-      (parsedProcessEnv.success && parsedProcessEnv.data === "production")
-        ? "production"
-        : (options.runtimeEnvironment ??
-            (parsedProcessEnv.success ? parsedProcessEnv.data : "production"));
-    if (resolvedEnv === "production") {
-      throw new Error(
-        "payout execution requires a durable executionClaimStore in production; " +
-        "the default in-memory store is not safe for production use"
-      );
-    }
-  }
-
-  const claimStatus = await executionClaimStore.tryClaim(
-    payoutExecutionIdempotencyKey
-  );
-  if (claimStatus !== "acquired") {
-    const skipReason =
-      claimStatus === "already_executed"
-        ? "already_executed"
-        : "payout_execution_in_progress";
-    await appendAuditEvent("payout_execution_skipped", {
-      reason: skipReason,
-      allocation_record_id: persistence.record_id,
-      candidate_payout_count: payoutExecutionCandidates.length,
-      payout_batch_hash: payoutBatchHash,
-      idempotency_key: payoutExecutionIdempotencyKey,
-    });
-    await appendObservability({
-      pagesFetched,
-      libraryCount: usageStats.length,
-      anomalyDetected: false,
-      anomalyCodes: [],
-      payoutOutcome: "skipped",
-      candidatePayoutCount: payoutExecutionCandidates.length,
-      executedCount: 0,
-      skipReason,
-    });
-    return buildCompletedOutput({
-      status: "skipped",
-      reason: skipReason,
       executed_count: 0,
     });
   }

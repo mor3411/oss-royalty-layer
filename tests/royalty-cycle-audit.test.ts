@@ -153,4 +153,32 @@ describe("royalty cycle audit trail", () => {
     const verification = verifyRoyaltyCycleAuditTrail("2026-02");
     expect(verification.status).toBe("valid");
   });
+
+  it("validates boundary hash after truncation", async () => {
+    clearInMemoryRoyaltyCycleAudits();
+
+    // Build a chain just past the truncation limit so boundary hash is set.
+    for (
+      let index = 0;
+      index < MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_EVENTS_PER_PERIOD + 1;
+      index += 1
+    ) {
+      await appendRoyaltyCycleAuditEvent({
+        period: "2026-02",
+        run_id: `rrn_tamper_${index}`,
+        event_type: "payout_execution_skipped",
+        payload: { index },
+      });
+    }
+
+    // After truncation, the retained chain must still verify — the first
+    // retained event's previous_event_hash should match the boundary hash
+    // of the last evicted event.
+    const events = getInMemoryRoyaltyCycleAuditsByPeriod("2026-02");
+    expect(events.length).toBe(MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_EVENTS_PER_PERIOD);
+    expect(events[0]?.previous_event_hash).not.toBeNull();
+
+    const verification = verifyRoyaltyCycleAuditTrail("2026-02");
+    expect(verification.status).toBe("valid");
+  });
 });

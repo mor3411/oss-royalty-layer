@@ -32,6 +32,7 @@ export const DEFAULT_MAX_INVALID_REJECTION_AUDITS_PER_WINDOW = 200;
 const SESSION_ID_REGEX = /^[a-f0-9]{32,128}$/;
 const RuntimeEnvironmentSchema = z.enum(["development", "test", "production"]);
 const AuditSinkFailureModeSchema = z.enum(["fail_open", "fail_closed"]);
+const SAFE_INTEGER_SCHEMA = z.number().int().safe();
 const THROTTLED_REJECTION_REASONS = new Set<string>([
   "invalid_payload",
   "too_many_libraries",
@@ -51,7 +52,7 @@ export const LibraryUsagePayloadSchema = z.object({
     .transform((value) => value.toLowerCase())
     .pipe(EcosystemSchema),
   version: z.string().trim().min(1).max(64),
-  calls: z.number().int().nonnegative(),
+  calls: SAFE_INTEGER_SCHEMA.nonnegative(),
 });
 
 export const LogLibraryUsageInputSchema = z.object({
@@ -505,10 +506,14 @@ function toAuditLibraryCount(value: unknown): number | undefined {
 function resolveRuntimeEnvironment(
   override: LogLibraryUsageOptions["runtimeEnvironment"]
 ): "development" | "test" | "production" {
+  const parsedEnvironment = RuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV);
+  // In production, ignore overrides to prevent environment downgrade attacks.
+  if (parsedEnvironment.success && parsedEnvironment.data === "production") {
+    return "production";
+  }
   if (override) {
     return override;
   }
-  const parsedEnvironment = RuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV);
   if (parsedEnvironment.success) {
     return parsedEnvironment.data;
   }

@@ -556,13 +556,21 @@ describe("runRoyaltyCycle", () => {
       throw new Error("expected approval hash note");
     }
 
-    const approval = await recordPayoutBatchApproval({
-      period: "2026-02",
-      payout_batch_hash: approvalHash,
-      decision: "approved",
-      reviewer_id: "fin.reviewer",
-      reason: "manual review passed",
-    });
+    const approval = await recordPayoutBatchApproval(
+      {
+        period: "2026-02",
+        payout_batch_hash: approvalHash,
+        decision: "approved",
+        reviewer_id: "fin.reviewer",
+        reason: "manual review passed",
+      },
+      {
+        principal: {
+          principal_id: "fin.reviewer",
+          role: "manager",
+        },
+      }
+    );
     expect(approval.status).toBe("recorded");
 
     const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
@@ -874,13 +882,21 @@ describe("runRoyaltyCycle", () => {
       throw new Error("expected approval hash note");
     }
 
-    await recordPayoutBatchApproval({
-      period: "2026-02",
-      payout_batch_hash: approvalHash,
-      decision: "approved",
-      reviewer_id: "fin.reviewer",
-      reason: "manual review passed",
-    });
+    await recordPayoutBatchApproval(
+      {
+        period: "2026-02",
+        payout_batch_hash: approvalHash,
+        decision: "approved",
+        reviewer_id: "fin.reviewer",
+        reason: "manual review passed",
+      },
+      {
+        principal: {
+          principal_id: "fin.reviewer",
+          role: "manager",
+        },
+      }
+    );
 
     const [concurrentA, concurrentB] = await Promise.all([
       runRoyaltyCycle(cycleInput, cycleOptions),
@@ -982,19 +998,27 @@ describe("runRoyaltyCycle", () => {
       throw new Error("expected approval hash note");
     }
 
-    await recordPayoutBatchApproval({
-      period: "2026-02",
-      payout_batch_hash: approvalHash,
-      decision: "adjusted",
-      reviewer_id: "fin.adjuster",
-      reason: "limit payout for manual holdback",
-      adjustments: [
-        {
-          maintainer_id: "mnt.alpha",
-          amount_minor: adjustedAmount,
+    await recordPayoutBatchApproval(
+      {
+        period: "2026-02",
+        payout_batch_hash: approvalHash,
+        decision: "adjusted",
+        reviewer_id: "fin.adjuster",
+        reason: "limit payout for manual holdback",
+        adjustments: [
+          {
+            maintainer_id: "mnt.alpha",
+            amount_minor: adjustedAmount,
+          },
+        ],
+      },
+      {
+        principal: {
+          principal_id: "fin.adjuster",
+          role: "manager",
         },
-      ],
-    });
+      }
+    );
 
     const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
     expect(secondRun.status).toBe("completed");
@@ -1122,19 +1146,27 @@ describe("runRoyaltyCycle", () => {
       throw new Error("expected approval hash note");
     }
 
-    await recordPayoutBatchApproval({
-      period: "2026-02",
-      payout_batch_hash: approvalHash,
-      decision: "adjusted",
-      reviewer_id: "fin.adjuster",
-      reason: "reduce alpha payout",
-      adjustments: [
-        {
-          maintainer_id: "mnt.alpha",
-          amount_minor: alphaAdjusted,
+    await recordPayoutBatchApproval(
+      {
+        period: "2026-02",
+        payout_batch_hash: approvalHash,
+        decision: "adjusted",
+        reviewer_id: "fin.adjuster",
+        reason: "reduce alpha payout",
+        adjustments: [
+          {
+            maintainer_id: "mnt.alpha",
+            amount_minor: alphaAdjusted,
+          },
+        ],
+      },
+      {
+        principal: {
+          principal_id: "fin.adjuster",
+          role: "manager",
         },
-      ],
-    });
+      }
+    );
 
     const secondRun = await runRoyaltyCycle(cycleInput, cycleOptions);
     if (secondRun.status !== "completed") {
@@ -1214,6 +1246,7 @@ describe("runRoyaltyCycle", () => {
         }
       )
     ).rejects.toThrowError("durable executionClaimStore in production");
+    expect(getInMemoryPersistedAllocations()).toHaveLength(0);
   });
 
   it("skips execution when callback adjustments alter payout destination data", async () => {

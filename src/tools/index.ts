@@ -1,7 +1,5 @@
 export {
   AuthorizationRuntimeEnvironmentSchema,
-  DEFAULT_ALLOW_TEST_AUTH_BYPASS,
-  RESERVED_PRINCIPAL_IDS,
   ToolPrincipalRoleSchema,
   ToolPrincipalSchema,
   assertToolAuthorized,
@@ -102,10 +100,8 @@ export {
   MAX_IN_MEMORY_INGESTED_EVENTS,
   LibraryUsageLoggedEnvelopeSchema,
   LibraryUsageIngestionMetricsSchema,
-  clearInMemoryLibraryUsageIngestionEvents,
   createLibraryUsageIngestionPipeline,
   createNdjsonLibraryUsageEventStore,
-  getInMemoryLibraryUsageIngestionEvents,
 } from "./library-usage-ingestion.js";
 export type {
   NdjsonLibraryUsageEventStoreOptions,
@@ -147,15 +143,11 @@ export type {
 
 export {
   AllocationPersistenceAuditSchema,
-  getInMemoryPersistedAllocationByPeriod,
   MAX_IN_MEMORY_ALLOCATION_PERSISTENCE_AUDITS,
   MAX_IN_MEMORY_PERSISTED_ALLOCATION_RECORDS,
   PersistAllocationsInputSchema,
   PersistAllocationsOutputSchema,
   PersistedAllocationRecordSchema,
-  clearInMemoryPersistedAllocations,
-  getInMemoryAllocationPersistenceAudits,
-  getInMemoryPersistedAllocations,
   persistAllocations,
 } from "./persist-allocations.js";
 export type {
@@ -171,10 +163,7 @@ export {
   CreatePayoutBatchOutputSchema,
   PayoutBatchEntrySchema,
   PayoutBatchFlagSchema,
-  clearInMemoryMaintainerProfiles,
   createPayoutBatch,
-  getInMemoryMaintainerProfiles,
-  upsertInMemoryMaintainerProfile,
 } from "./create-payout-batch.js";
 export type {
   CreatePayoutBatchInput,
@@ -205,9 +194,6 @@ export {
   RoyaltyCycleAuditRecordSchema,
   VerifyRoyaltyCycleAuditTrailOutputSchema,
   appendRoyaltyCycleAuditEvent,
-  clearInMemoryRoyaltyCycleAudits,
-  getInMemoryRoyaltyCycleAudits,
-  getInMemoryRoyaltyCycleAuditsByPeriod,
   verifyRoyaltyCycleAuditTrail,
 } from "./royalty-cycle-audit.js";
 export type {
@@ -232,8 +218,6 @@ export {
   RoyaltyRunAnomalyMetricsSchema,
   RoyaltyRunPayoutMetricsSchema,
   RoyaltyRunTelemetryMetricsSchema,
-  clearInMemoryRoyaltyObservabilitySamples,
-  getInMemoryRoyaltyObservabilitySamples,
   getRoyaltyObservabilityDashboard,
   recordRoyaltyObservabilitySample,
 } from "./royalty-observability.js";
@@ -258,11 +242,8 @@ export {
   PayoutBatchApprovalRecordSchema,
   RecordPayoutBatchApprovalInputSchema,
   RecordPayoutBatchApprovalOutputSchema,
-  clearInMemoryPayoutBatchApprovals,
   computePayoutBatchHash,
   computePayoutBatchHashFromOutput,
-  getInMemoryPayoutBatchApproval,
-  getInMemoryPayoutBatchApprovals,
   recordPayoutBatchApproval,
 } from "./payout-batch-approval.js";
 export type {

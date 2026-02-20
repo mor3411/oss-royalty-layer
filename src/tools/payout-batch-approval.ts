@@ -312,6 +312,13 @@ export async function recordPayoutBatchApproval(
   const eventIdGenerator = options.eventIdGenerator ?? defaultEventIdGenerator;
   const store = options.store ?? inMemoryPayoutBatchApprovalStore;
 
+  if (
+    principal.principal_id === RESERVED_PRINCIPAL_IDS.TEST_AUTH_BYPASS ||
+    principal.principal_id === RESERVED_PRINCIPAL_IDS.ANONYMOUS
+  ) {
+    throw new Error("reserved principals cannot record payout batch approvals");
+  }
+
   const existing = await store.readByPeriodAndHash(
     parsedInput.period,
     parsedInput.payout_batch_hash
@@ -323,12 +330,6 @@ export async function recordPayoutBatchApproval(
     );
   }
 
-  const effectiveReviewerId =
-    principal.principal_id !== RESERVED_PRINCIPAL_IDS.TEST_AUTH_BYPASS &&
-    principal.principal_id !== RESERVED_PRINCIPAL_IDS.ANONYMOUS
-      ? principal.principal_id
-      : parsedInput.reviewer_id;
-
   const record: PayoutBatchApprovalRecord = {
     approval_event_id: eventIdGenerator(
       parsedInput.period,
@@ -338,7 +339,7 @@ export async function recordPayoutBatchApproval(
     period: parsedInput.period,
     payout_batch_hash: parsedInput.payout_batch_hash,
     decision: parsedInput.decision,
-    reviewer_id: effectiveReviewerId,
+    reviewer_id: principal.principal_id,
     reason: parsedInput.reason,
     adjustments: parsedInput.adjustments,
     reviewed_at: reviewedAt,

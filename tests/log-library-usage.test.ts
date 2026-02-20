@@ -120,6 +120,28 @@ describe("logLibraryUsage", () => {
     expect(getLibraryUsageEvents()).toHaveLength(0);
   });
 
+  it("rejects unsafe integer call counts", async () => {
+    const result = await logLibraryUsage({
+      session_id: SESSION_IDS.three,
+      source: "api",
+      ts: "2026-02-17T12:00:00.000Z",
+      libraries: [
+        {
+          name: "zod",
+          ecosystem: "npm",
+          version: "3.23.8",
+          calls: Number.MAX_SAFE_INTEGER + 1,
+        },
+      ],
+    });
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "invalid_payload",
+    });
+    expect(getLibraryUsageEvents()).toHaveLength(0);
+  });
+
   it("rejects non-hash session identifiers", async () => {
     const result = await logLibraryUsage({
       session_id: "sess-plain-text",
@@ -652,6 +674,41 @@ describe("logLibraryUsage", () => {
       expect(second).toEqual({
         status: "ok",
         recorded_count: 1,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.stubEnv("NODE_ENV", "test");
+    }
+  });
+
+  it("ignores runtimeEnvironment override when NODE_ENV is production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    try {
+      const auditRejection = vi.fn();
+      const result = await logLibraryUsage(
+        {
+          session_id: SESSION_IDS.one,
+          source: "api",
+          ts: "2026-02-17T12:00:00.000Z",
+          libraries: [
+            {
+              name: "zod",
+              ecosystem: "npm",
+              version: "3.23.8",
+              calls: 1,
+            },
+          ],
+        },
+        {
+          runtimeEnvironment: "test",
+          auditRejection,
+        }
+      );
+
+      expect(result).toEqual({
+        status: "rejected",
+        reason: "guardrails_not_configured",
       });
     } finally {
       vi.unstubAllEnvs();

@@ -21,6 +21,7 @@ const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1000;
 const AGGREGATION_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const MAX_AGGREGATION_SNAPSHOTS = 256;
+const SAFE_INTEGER_SCHEMA = z.number().int().safe();
 
 export const AggregateUsageForPeriodInputSchema = z
   .object({
@@ -36,8 +37,8 @@ export const AggregateUsageForPeriodInputSchema = z
 
 export const AggregatedLibraryUsageSchema = z.object({
   library_id: z.string().min(1),
-  total_calls: z.number().int().nonnegative(),
-  unique_sessions: z.number().int().nonnegative(),
+  total_calls: SAFE_INTEGER_SCHEMA.nonnegative(),
+  unique_sessions: SAFE_INTEGER_SCHEMA.nonnegative(),
 });
 
 export const AggregateUsageForPeriodOutputSchema = z.object({
@@ -121,6 +122,14 @@ function cleanupAggregationSnapshots(nowMs: number): void {
   }
 }
 
+function toSafeIntegerSum(left: number, right: number): number | null {
+  const sum = BigInt(left) + BigInt(right);
+  if (sum > BigInt(Number.MAX_SAFE_INTEGER) || sum < BigInt(Number.MIN_SAFE_INTEGER)) {
+    return null;
+  }
+  return Number(sum);
+}
+
 function storeSnapshot(aggregates: AggregatedLibraryUsage[], nowMs: number, queryHash: string): string {
   cleanupAggregationSnapshots(nowMs);
   const snapshotId = randomUUID();
@@ -159,7 +168,11 @@ async function buildAggregates(
       totalCalls: 0,
       sessionIds: new Set<string>(),
     };
-    existing.totalCalls += envelope.event.library.calls;
+    const nextTotalCalls = toSafeIntegerSum(existing.totalCalls, envelope.event.library.calls);
+    if (nextTotalCalls === null) {
+      throw new Error(`aggregate total_calls overflow for library ${libraryId}`);
+    }
+    existing.totalCalls = nextTotalCalls;
     existing.sessionIds.add(envelope.event.session_id);
     byLibrary.set(libraryId, existing);
   }

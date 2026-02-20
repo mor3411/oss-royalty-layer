@@ -107,6 +107,14 @@ type AppendRoyaltyCycleAuditEventOptions = {
 
 const inMemoryAuditRecordsByPeriod = new Map<string, RoyaltyCycleAuditRecord[]>();
 const inMemoryTruncatedAuditPeriods = new Set<string>();
+/**
+ * When events are evicted from the head of the in-memory ring buffer we
+ * record the event_hash of the last evicted event.  This "boundary hash"
+ * allows the chain verifier to confirm that the first retained event
+ * correctly chains to the evicted prefix, closing the gap that previously
+ * allowed arbitrary previous_event_hash values after truncation.
+ */
+const inMemoryTruncationBoundaryHash = new Map<string, string>();
 export const MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_EVENTS_PER_PERIOD = 1_000;
 export const MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_PERIODS = 24;
 const AUDIT_PREVIOUS_HASH_MISMATCH_CODE = "audit_previous_hash_mismatch";
@@ -162,8 +170,11 @@ const inMemoryRoyaltyCycleAuditStore: RoyaltyCycleAuditStore = {
 
     const current = inMemoryAuditRecordsByPeriod.get(record.period) ?? [];
     while (current.length >= MAX_IN_MEMORY_ROYALTY_CYCLE_AUDIT_EVENTS_PER_PERIOD) {
-      current.shift();
+      const evicted = current.shift();
       inMemoryTruncatedAuditPeriods.add(record.period);
+      if (evicted) {
+        inMemoryTruncationBoundaryHash.set(record.period, evicted.event_hash);
+      }
     }
     current.push(cloneAuditRecord(record));
     inMemoryAuditRecordsByPeriod.set(record.period, current);
@@ -177,6 +188,7 @@ const inMemoryRoyaltyCycleAuditStore: RoyaltyCycleAuditStore = {
   clear(): void {
     inMemoryAuditRecordsByPeriod.clear();
     inMemoryTruncatedAuditPeriods.clear();
+    inMemoryTruncationBoundaryHash.clear();
   },
 };
 
@@ -246,6 +258,7 @@ function computeEventHash(input: {
 export function clearInMemoryRoyaltyCycleAudits(): void {
   inMemoryAuditRecordsByPeriod.clear();
   inMemoryTruncatedAuditPeriods.clear();
+  inMemoryTruncationBoundaryHash.clear();
 }
 
 export function getInMemoryRoyaltyCycleAuditsByPeriod(
@@ -274,6 +287,7 @@ export function verifyRoyaltyCycleAuditTrail(period: string): VerifyRoyaltyCycle
   PeriodSchema.parse(period);
   const events = getInMemoryRoyaltyCycleAuditsByPeriod(period);
   const periodWasTruncated = inMemoryTruncatedAuditPeriods.has(period);
+  const boundaryHash = inMemoryTruncationBoundaryHash.get(period) ?? null;
   let previousHash: string | null = null;
 
   for (let index = 0; index < events.length; index += 1) {
@@ -281,17 +295,26 @@ export function verifyRoyaltyCycleAuditTrail(period: string): VerifyRoyaltyCycle
     if (!event) {
       continue;
     }
-    if (
-      index === 0 &&
-      event.previous_event_hash !== null &&
-      !periodWasTruncated
-    ) {
-      return {
-        status: "invalid",
-        period,
-        checked_events: events.length,
-        reason: `invalid chain start at event ${event.event_id}`,
-      };
+    if (index === 0) {
+      if (periodWasTruncated) {
+        // After truncation, the first retained event must chain to the
+        // boundary hash of the last evicted event.
+        if (boundaryHash !== null && event.previous_event_hash !== boundaryHash) {
+          return {
+            status: "invalid",
+            period,
+            checked_events: events.length,
+            reason: `truncated chain boundary mismatch at event ${event.event_id}`,
+          };
+        }
+      } else if (event.previous_event_hash !== null) {
+        return {
+          status: "invalid",
+          period,
+          checked_events: events.length,
+          reason: `invalid chain start at event ${event.event_id}`,
+        };
+      }
     }
     if (index > 0 && event.previous_event_hash !== previousHash) {
       return {

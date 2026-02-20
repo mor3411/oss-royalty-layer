@@ -221,7 +221,7 @@ export function validateAllocationConstraints(
 
   const result: ValidateAllocationConstraintsResult = {
     status: violations.length === 0 ? "valid" : "invalid",
-    total_allocated_minor: Math.max(0, totalAllocatedMinor),
+    total_allocated_minor: totalAllocatedMinor,
     expected_pool_minor: values.pool_amount_minor,
     violations,
   };
