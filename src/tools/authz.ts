@@ -58,20 +58,30 @@ const AUTHORIZED_ROLES_BY_TOOL: Record<GuardrailedToolName, ToolPrincipalRole[]>
 function resolveRuntimeEnvironment(
   override: AuthorizationRuntimeEnvironment | undefined
 ): AuthorizationRuntimeEnvironment {
+  const parsedProcessEnv = AuthorizationRuntimeEnvironmentSchema.safeParse(
+    process.env.NODE_ENV
+  );
+  // In production, ignore overrides to prevent downgrade attacks.
+  if (parsedProcessEnv.success && parsedProcessEnv.data === "production") {
+    return "production";
+  }
   if (override !== undefined) {
     return override;
   }
-  const parsedEnvironment = AuthorizationRuntimeEnvironmentSchema.safeParse(
-    process.env.NODE_ENV
-  );
-  if (parsedEnvironment.success) {
-    return parsedEnvironment.data;
+  if (parsedProcessEnv.success) {
+    return parsedProcessEnv.data;
   }
   // Unknown runtime mode should fail closed.
   return "production";
 }
 
 function resolveAllowTestBypass(override: boolean | undefined): boolean {
+  const parsedEnv = AuthorizationRuntimeEnvironmentSchema.safeParse(
+    process.env.NODE_ENV
+  );
+  if (parsedEnv.success && parsedEnv.data === "production") {
+    return false;
+  }
   if (override !== undefined) {
     return override;
   }

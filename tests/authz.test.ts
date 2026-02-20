@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   assertToolAuthorized,
@@ -67,5 +67,21 @@ describe("tool authorization", () => {
         allowTestBypass: false,
       })
     ).toThrowError("authorization required");
+  });
+
+  it("ignores runtimeEnvironment and allowTestBypass overrides when NODE_ENV is production", () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "production";
+      expect(() =>
+        assertToolAuthorized({
+          toolName: "aggregate_usage_for_period",
+          runtimeEnvironment: "test",
+          allowTestBypass: true,
+        })
+      ).toThrowError("authorization required");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
   });
 });

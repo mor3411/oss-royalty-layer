@@ -360,6 +360,11 @@ describe("runRoyaltyCycle", () => {
           detectPayoutAnomalies: () => ({ has_anomaly: false }),
           approvePayoutBatch: () => ({ approved: true }),
           executePayouts,
+          executionClaimStore: {
+            tryClaim: () => "acquired" as const,
+            markExecuted: () => {},
+            releaseClaim: () => {},
+          },
           runtimeEnvironment: "production",
           allowTestAuthBypass: false,
           principal: {
@@ -1145,6 +1150,70 @@ describe("runRoyaltyCycle", () => {
     expect(executeInput?.payouts).toHaveLength(2);
     expect(executedAmountsByMaintainer.get("mnt.alpha")).toBe(alphaAdjusted);
     expect(executedAmountsByMaintainer.get("mnt.beta")).toBe(betaOriginal);
+  });
+
+  it("refuses payout execution with default in-memory claim store in production", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    await expect(
+      runRoyaltyCycle(
+        {
+          period: "2026-02",
+          period_start: "2026-02-19T00:00:00.000Z",
+          period_end: "2026-02-20T00:00:00.000Z",
+          pool_amount_minor: 500,
+        },
+        {
+          eventStore: {
+            readAll: pipeline.readIngestedEvents,
+            append: () => {
+              throw new Error("not used");
+            },
+          },
+          resolveLibraryId: (reference) => registry.resolveLibraryId(reference).library_id,
+          resolveMaintainerId: (libraryId) =>
+            libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+          detectPayoutAnomalies: () => ({ has_anomaly: false }),
+          approvePayoutBatch: () => ({ approved: true }),
+          executePayouts: (input) => ({
+            executed_count: input.payouts.length,
+            results: [],
+          }),
+          runtimeEnvironment: "production",
+          principal: {
+            principal_id: "svc-1",
+            role: "service",
+          },
+        }
+      )
+    ).rejects.toThrowError("durable executionClaimStore in production");
   });
 
   it("skips execution when callback adjustments alter payout destination data", async () => {

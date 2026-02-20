@@ -52,6 +52,7 @@ import {
 import { type LibraryIdResolver } from "../tools/library-registry.js";
 import {
   assertToolAuthorized,
+  AuthorizationRuntimeEnvironmentSchema,
   type AuthorizationRuntimeEnvironment,
 } from "../tools/authz.js";
 import { assertToolRiskAllowed, type ToolRiskLevel } from "../tools/guardrails.js";
@@ -712,6 +713,7 @@ export async function runRoyaltyCycle(
   });
   notes.push(`approval_hash=${payoutBatchHash}`);
   const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${persistence.record_id}`;
+  const usingDefaultClaimStore = !options.executionClaimStore;
   const executionClaimStore =
     options.executionClaimStore ?? inMemoryPayoutExecutionClaimStore;
   const buildCompletedOutput = (
@@ -1048,6 +1050,19 @@ export async function runRoyaltyCycle(
       reason: "already_executed",
       executed_count: 0,
     });
+  }
+
+  if (usingDefaultClaimStore) {
+    const resolvedEnv = options.runtimeEnvironment ??
+      (AuthorizationRuntimeEnvironmentSchema.safeParse(process.env.NODE_ENV).success
+        ? (AuthorizationRuntimeEnvironmentSchema.parse(process.env.NODE_ENV) as AuthorizationRuntimeEnvironment)
+        : "production");
+    if (resolvedEnv === "production") {
+      throw new Error(
+        "payout execution requires a durable executionClaimStore in production; " +
+        "the default in-memory store is not safe for production use"
+      );
+    }
   }
 
   const claimStatus = await executionClaimStore.tryClaim(

@@ -296,7 +296,7 @@ export async function computeAllocations(
   const effectiveMaxShare = Math.max(policy.max_share_per_library, minFeasibleShare);
   const maxShareRelaxed = effectiveMaxShare !== policy.max_share_per_library;
 
-  const capAmount = Math.floor(parsedInput.pool_amount_minor * effectiveMaxShare);
+  const capAmount = Math.max(1, Math.floor(parsedInput.pool_amount_minor * effectiveMaxShare));
   const floorAmount = Math.min(
     policy.min_floor_amount_minor,
     Math.floor(parsedInput.pool_amount_minor / rankedUsage.length),

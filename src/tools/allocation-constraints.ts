@@ -205,7 +205,7 @@ export function validateAllocationConstraints(
     });
   }
 
-  const maxLibraryAmount = values.pool_amount_minor * values.max_share_per_library;
+  const maxLibraryAmount = Math.max(1, Math.floor(values.pool_amount_minor * values.max_share_per_library));
   for (const [libraryId, amountMinor] of byLibrary) {
     if (amountMinor > maxLibraryAmount) {
       const share = formatMinorRatio(amountMinor, values.pool_amount_minor);

@@ -282,7 +282,7 @@ export async function recordPayoutBatchApproval(
   input: unknown,
   options: RecordPayoutBatchApprovalOptions = {}
 ): Promise<RecordPayoutBatchApprovalOutput> {
-  assertToolAuthorized({
+  const principal = assertToolAuthorized({
     toolName: "record_payout_batch_approval",
     ...(options.principal === undefined ? {} : { principal: options.principal }),
     ...(options.runtimeEnvironment === undefined
@@ -306,6 +306,23 @@ export async function recordPayoutBatchApproval(
   const eventIdGenerator = options.eventIdGenerator ?? defaultEventIdGenerator;
   const store = options.store ?? inMemoryPayoutBatchApprovalStore;
 
+  const existing = await store.readByPeriodAndHash(
+    parsedInput.period,
+    parsedInput.payout_batch_hash
+  );
+  if (existing) {
+    throw new Error(
+      `approval record already exists for period ${parsedInput.period} ` +
+      `and batch hash ${parsedInput.payout_batch_hash}; approvals are immutable`
+    );
+  }
+
+  const effectiveReviewerId =
+    principal.principal_id !== "test-auth-bypass" &&
+    principal.principal_id !== "anonymous"
+      ? principal.principal_id
+      : parsedInput.reviewer_id;
+
   const record: PayoutBatchApprovalRecord = {
     approval_event_id: eventIdGenerator(
       parsedInput.period,
@@ -315,7 +332,7 @@ export async function recordPayoutBatchApproval(
     period: parsedInput.period,
     payout_batch_hash: parsedInput.payout_batch_hash,
     decision: parsedInput.decision,
-    reviewer_id: parsedInput.reviewer_id,
+    reviewer_id: effectiveReviewerId,
     reason: parsedInput.reason,
     adjustments: parsedInput.adjustments,
     reviewed_at: reviewedAt,

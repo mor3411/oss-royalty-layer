@@ -123,6 +123,54 @@ describe("computeAllocations", () => {
     ).rejects.toThrowError("requires medium risk allowance");
   });
 
+  it("handles pool_amount_minor=1 with 2 libraries", async () => {
+    const result = await computeAllocations({
+      period: "2026-02",
+      pool_amount_minor: 1,
+      usage_stats: [
+        { library_id: "lib.a", total_calls: 10, unique_sessions: 2 },
+        { library_id: "lib.b", total_calls: 5, unique_sessions: 1 },
+      ],
+    });
+
+    const total = result.allocations.reduce((s, a) => s + a.amount_minor, 0);
+    expect(total).toBe(1);
+  });
+
+  it("handles pool_amount_minor=2 with 3 libraries", async () => {
+    const result = await computeAllocations({
+      period: "2026-02",
+      pool_amount_minor: 2,
+      usage_stats: [
+        { library_id: "lib.a", total_calls: 10, unique_sessions: 2 },
+        { library_id: "lib.b", total_calls: 5, unique_sessions: 1 },
+        { library_id: "lib.c", total_calls: 3, unique_sessions: 1 },
+      ],
+    });
+
+    const total = result.allocations.reduce((s, a) => s + a.amount_minor, 0);
+    expect(total).toBe(2);
+  });
+
+  it("handles pool_amount_minor=3 with 4 libraries (pool < N)", async () => {
+    const result = await computeAllocations({
+      period: "2026-02",
+      pool_amount_minor: 3,
+      usage_stats: [
+        { library_id: "lib.a", total_calls: 10, unique_sessions: 2 },
+        { library_id: "lib.b", total_calls: 5, unique_sessions: 1 },
+        { library_id: "lib.c", total_calls: 3, unique_sessions: 1 },
+        { library_id: "lib.d", total_calls: 1, unique_sessions: 1 },
+      ],
+    });
+
+    const total = result.allocations.reduce((s, a) => s + a.amount_minor, 0);
+    expect(total).toBe(3);
+    for (const alloc of result.allocations) {
+      expect(alloc.amount_minor).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it("supports custom maintainer resolver", async () => {
     const result = await computeAllocations(
       {
