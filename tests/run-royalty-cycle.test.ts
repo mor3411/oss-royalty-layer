@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_STALE_IN_PROGRESS_CLAIM_MS,
   clearInMemoryRunRoyaltyCycleExecutionClaims,
   runRoyaltyCycle,
   type ExecutePayoutsInput,
@@ -1263,6 +1264,95 @@ describe("runRoyaltyCycle", () => {
       throw new Error("expected completed cycle output");
     }
     expect(secondRun.execution.status).toBe("executed");
+    expect(executePayouts).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers stale in-progress payout execution claims after cooldown", async () => {
+    const pipeline = createLibraryUsageIngestionPipeline();
+    const registry = createInMemoryLibraryRegistry();
+    let nowMs = 0;
+
+    await pipeline.enqueueEvent({
+      session_id: SESSION_IDS.one,
+      source: "cli",
+      ts: "2026-02-19T10:00:00.000Z",
+      library: {
+        name: "alpha",
+        ecosystem: "npm",
+        version: "1.0.0",
+        calls: 5,
+      },
+    });
+
+    const alphaLibraryId = registry.resolveLibraryId({
+      ecosystem: "npm",
+      name: "alpha",
+    }).library_id;
+
+    upsertInMemoryMaintainerProfile({
+      id: "mnt.alpha",
+      verification_status: "verified",
+      payout_account: {
+        provider: "stripe",
+        account_id: "acct_alpha",
+      },
+    });
+
+    const executePayouts = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("psp timeout"))
+      .mockResolvedValueOnce({
+        executed_count: 1,
+        results: [],
+      });
+
+    const cycleInput = {
+      period: "2026-02",
+      period_start: "2026-02-19T00:00:00.000Z",
+      period_end: "2026-02-20T00:00:00.000Z",
+      pool_amount_minor: 500,
+    };
+    const cycleOptions = {
+      eventStore: {
+        readAll: pipeline.readIngestedEvents,
+        append: () => {
+          throw new Error("not used");
+        },
+      },
+      resolveLibraryId: (reference: { ecosystem: string; name: string }) =>
+        registry.resolveLibraryId(reference).library_id,
+      resolveMaintainerId: (libraryId: string) =>
+        libraryId === alphaLibraryId ? "mnt.alpha" : "mnt.unknown",
+      detectPayoutAnomalies: () => ({ has_anomaly: false }),
+      approvePayoutBatch: () => ({ approved: true }),
+      executePayouts,
+      now: () => nowMs,
+    };
+
+    await expect(runRoyaltyCycle(cycleInput, cycleOptions)).rejects.toThrowError("psp timeout");
+
+    nowMs = 1_000;
+    const blockedRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(blockedRun.status).toBe("completed");
+    if (blockedRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(blockedRun.execution).toEqual({
+      status: "skipped",
+      reason: "payout_execution_in_progress",
+      executed_count: 0,
+    });
+
+    nowMs = DEFAULT_STALE_IN_PROGRESS_CLAIM_MS + 2_000;
+    const recoveredRun = await runRoyaltyCycle(cycleInput, cycleOptions);
+    expect(recoveredRun.status).toBe("completed");
+    if (recoveredRun.status !== "completed") {
+      throw new Error("expected completed cycle output");
+    }
+    expect(recoveredRun.execution.status).toBe("executed");
+    expect(
+      recoveredRun.notes.includes("stale_execution_claim_released=true")
+    ).toBe(true);
     expect(executePayouts).toHaveBeenCalledTimes(2);
   });
 

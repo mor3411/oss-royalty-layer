@@ -27,6 +27,7 @@ import {
 import {
   appendRoyaltyCycleAuditEvent,
   getInMemoryRoyaltyCycleAuditsByPeriod,
+  type RoyaltyCycleAuditRecord,
   type RoyaltyCycleAuditStore,
 } from "../tools/royalty-cycle-audit.js";
 import {
@@ -163,6 +164,7 @@ export type RunRoyaltyCycleOptions = {
   payoutMaxAllowedRisk?: ToolRiskLevel;
   maxAggregationPeriodDays?: number;
   executionClaimStore?: PayoutExecutionClaimStore;
+  staleInProgressClaimMs?: number;
 };
 
 export type RunRoyaltyCycleOutput =
@@ -216,6 +218,7 @@ const inMemoryPayoutExecutionClaimStates = new Map<
   string,
   InMemoryPayoutExecutionClaimState
 >();
+export const DEFAULT_STALE_IN_PROGRESS_CLAIM_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Clears in-memory execution claims used by the orchestrator's default
@@ -288,6 +291,42 @@ function isKnownPreExecutionFailure(error: unknown): boolean {
     return true;
   }
   return (error as ExecutePayoutsFailure).code === "payout_not_executed";
+}
+
+function resolveStaleInProgressClaimMs(override: number | undefined): number {
+  if (override === undefined) {
+    return DEFAULT_STALE_IN_PROGRESS_CLAIM_MS;
+  }
+  if (!Number.isInteger(override) || override <= 0) {
+    throw new Error("staleInProgressClaimMs must be a positive integer");
+  }
+  return override;
+}
+
+function getOldestInProgressClaimSkipObservedAtMs(
+  audits: RoyaltyCycleAuditRecord[],
+  idempotencyKey: string
+): number | null {
+  let oldestMs: number | null = null;
+  for (const event of audits) {
+    if (event.event_type !== "payout_execution_skipped") {
+      continue;
+    }
+    if (event.payload.idempotency_key !== idempotencyKey) {
+      continue;
+    }
+    if (event.payload.reason !== "payout_execution_in_progress") {
+      continue;
+    }
+    const observedAtMs = Date.parse(event.observed_at);
+    if (!Number.isFinite(observedAtMs)) {
+      continue;
+    }
+    if (oldestMs === null || observedAtMs < oldestMs) {
+      oldestMs = observedAtMs;
+    }
+  }
+  return oldestMs;
 }
 
 function applyApprovalAdjustments(
@@ -830,6 +869,9 @@ export async function runRoyaltyCycle(
   const notes: string[] = [];
   const mediumRisk = options.maxAllowedRisk ?? "medium";
   const payoutRisk = options.payoutMaxAllowedRisk ?? "high";
+  const staleInProgressClaimMs = resolveStaleInProgressClaimMs(
+    options.staleInProgressClaimMs
+  );
   const runEpochMs = options.now?.() ?? Date.now();
   const runId = `rrn_${createHash("sha256")
     .update(parsedInput.period)
@@ -1102,6 +1144,19 @@ export async function runRoyaltyCycle(
   const payoutExecutionIdempotencyKey = `execute_payouts:${parsedInput.period}:${persistence.record_id}`;
   const executionClaimStore =
     options.executionClaimStore ?? inMemoryPayoutExecutionClaimStore;
+  let periodAuditsCache: RoyaltyCycleAuditRecord[] | null = null;
+  const readPeriodAudits = async (): Promise<RoyaltyCycleAuditRecord[]> => {
+    if (periodAuditsCache !== null) {
+      return periodAuditsCache;
+    }
+    periodAuditsCache =
+      (
+        options.auditStore
+          ? await options.auditStore.readByPeriod(parsedInput.period)
+          : getInMemoryRoyaltyCycleAuditsByPeriod(parsedInput.period)
+      ) ?? [];
+    return periodAuditsCache;
+  };
   const buildCompletedOutput = (
     execution: Extract<RunRoyaltyCycleOutput, { status: "completed" }>["execution"]
   ): RunRoyaltyCycleOutput => ({
@@ -1190,9 +1245,28 @@ export async function runRoyaltyCycle(
   // This eliminates the TOCTOU gap that existed when audit-trail reads
   // preceded the claim attempt — concurrent invocations could both pass
   // the audit check before either acquired the claim.
-  const claimStatus = await executionClaimStore.tryClaim(
+  let claimStatus = await executionClaimStore.tryClaim(
     payoutExecutionIdempotencyKey
   );
+  if (claimStatus === "in_progress") {
+    const periodAudits = await readPeriodAudits();
+    const oldestClaimSkipMs = getOldestInProgressClaimSkipObservedAtMs(
+      periodAudits,
+      payoutExecutionIdempotencyKey
+    );
+    if (
+      oldestClaimSkipMs !== null &&
+      runEpochMs - oldestClaimSkipMs >= staleInProgressClaimMs
+    ) {
+      await executionClaimStore.releaseClaim(payoutExecutionIdempotencyKey);
+      claimStatus = await executionClaimStore.tryClaim(
+        payoutExecutionIdempotencyKey
+      );
+      if (claimStatus === "acquired") {
+        notes.push("stale_execution_claim_released=true");
+      }
+    }
+  }
   if (claimStatus !== "acquired") {
     const skipReason =
       claimStatus === "already_executed"
@@ -1226,12 +1300,7 @@ export async function runRoyaltyCycle(
   // execution is recorded in the audit trail.  If a stale audit record is
   // found (e.g. claim store was reset but audit trail persists), release
   // the claim and skip to avoid double-payout.
-  const periodAudits =
-    (
-      options.auditStore
-        ? await options.auditStore.readByPeriod(parsedInput.period)
-        : getInMemoryRoyaltyCycleAuditsByPeriod(parsedInput.period)
-    ) ?? [];
+  const periodAudits = await readPeriodAudits();
   const runIdsByAllocationRecordId = new Set<string>();
   for (const event of periodAudits) {
     if (event.event_type !== "allocation_proposal_persisted") {
